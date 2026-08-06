@@ -8,8 +8,26 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
+mod domain;
+mod eval;
+mod migrate;
+mod routing;
+mod security;
 mod usage;
 
+use routing::{match_score, tokens, validate_aliases};
+
+pub use domain::{
+    DomainConfig, DomainRegistry, domain_catalog_path, load_domain_registry,
+    write_domain_registry_atomic,
+};
+pub use eval::{EvalCase, EvalReport, EvalSuite, evaluate, load_eval_suite};
+pub use migrate::{
+    HostKind, MigrationPlan, MigrationReceipt, MigrationSource, apply_migration,
+    apply_migration_with_receipt, load_migration_plan, load_migration_receipt, plan_migration,
+    rollback_migration, write_migration_plan, write_migration_receipt,
+};
+pub use security::{PolicyFinding, PolicyReport, TrustLevel, inspect_catalog};
 pub use usage::{UsageEntry, UsageReport, record_hydrations, usage_report};
 
 pub const CATALOG_SCHEMA: &str = "skillleaf.catalog.v1";
@@ -62,6 +80,12 @@ pub struct CatalogEntry {
     pub content_sha256: String,
     pub bytes: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "TrustLevel::is_trusted")]
+    pub trust: TrustLevel,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<Dependency>,
 }
 
@@ -86,12 +110,24 @@ pub struct SourceRoot {
     pub path: PathBuf,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct BuildOptions {
+    /// Backwards-compatible source-wide trust override.
+    pub untrusted_sources: BTreeSet<String>,
+    /// Kind-scoped trust override using `<source>/<skill|command>` keys.
+    pub untrusted_roots: BTreeSet<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Default)]
 struct Frontmatter {
     name: Option<String>,
     description: Option<String>,
     #[serde(default)]
     dependencies: Vec<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    #[serde(default)]
+    capabilities: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -123,11 +159,23 @@ pub struct HydratedEntry {
 }
 
 pub fn build_catalog(roots: &[SourceRoot], max_file_bytes: u64) -> SkillleafResult<Catalog> {
-    build_catalog_inner(roots, max_file_bytes)
+    build_catalog_with_options(roots, max_file_bytes, &BuildOptions::default())
+}
+
+pub fn build_catalog_with_options(
+    roots: &[SourceRoot],
+    max_file_bytes: u64,
+    options: &BuildOptions,
+) -> SkillleafResult<Catalog> {
+    build_catalog_inner(roots, max_file_bytes, options)
         .map_err(|error| SkillleafError::CatalogInput(format!("{error:#}")))
 }
 
-fn build_catalog_inner(roots: &[SourceRoot], max_file_bytes: u64) -> Result<Catalog> {
+fn build_catalog_inner(
+    roots: &[SourceRoot],
+    max_file_bytes: u64,
+    options: &BuildOptions,
+) -> Result<Catalog> {
     if roots.is_empty() {
         bail!("at least one source root is required");
     }
@@ -151,10 +199,20 @@ fn build_catalog_inner(roots: &[SourceRoot], max_file_bytes: u64) -> Result<Cata
             bail!("duplicate source and kind: {root_key}");
         }
         match root.kind {
-            EntryKind::Skill => index_skills(&root.name, &canonical, max_file_bytes, &mut entries)?,
-            EntryKind::Command => {
-                index_commands(&root.name, &canonical, max_file_bytes, &mut entries)?
-            }
+            EntryKind::Skill => index_skills(
+                &root.name,
+                &canonical,
+                max_file_bytes,
+                source_trust(&root.name, root.kind, options),
+                &mut entries,
+            )?,
+            EntryKind::Command => index_commands(
+                &root.name,
+                &canonical,
+                max_file_bytes,
+                source_trust(&root.name, root.kind, options),
+                &mut entries,
+            )?,
             EntryKind::Resource => bail!("resource roots are discovered through skill packages"),
         }
     }
@@ -166,6 +224,7 @@ fn build_catalog_inner(roots: &[SourceRoot], max_file_bytes: u64) -> Result<Cata
             bail!("duplicate catalog selector: {}", entry.selector());
         }
     }
+    validate_aliases(&entries)?;
     validate_dependencies(&entries)?;
 
     let catalog_sha256 = catalog_hash(&root_map, &entries)?;
@@ -182,11 +241,11 @@ pub fn write_catalog_atomic(catalog: &Catalog, output: &Path) -> SkillleafResult
         .map_err(|error| SkillleafError::Storage(format!("{error:#}")))
 }
 
-fn write_catalog_atomic_inner(catalog: &Catalog, output: &Path) -> Result<()> {
+pub(crate) fn write_json_atomic<T: Serialize>(value: &T, output: &Path) -> Result<()> {
     let parent = output.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    serde_json::to_writer_pretty(&mut temporary, catalog)?;
+    serde_json::to_writer_pretty(&mut temporary, value)?;
     temporary.write_all(b"\n")?;
     temporary.as_file().sync_all()?;
     temporary
@@ -194,6 +253,10 @@ fn write_catalog_atomic_inner(catalog: &Catalog, output: &Path) -> Result<()> {
         .map_err(|error| error.error)
         .with_context(|| format!("cannot atomically replace {}", output.display()))?;
     Ok(())
+}
+
+fn write_catalog_atomic_inner(catalog: &Catalog, output: &Path) -> Result<()> {
+    write_json_atomic(catalog, output)
 }
 
 pub fn load_catalog(path: &Path) -> SkillleafResult<Catalog> {
@@ -242,14 +305,17 @@ fn resolve_inner(
         if entry.kind == EntryKind::Resource {
             continue;
         }
-        let score = match_score(entry, &task_tokens);
+        if entry.trust == TrustLevel::Untrusted {
+            continue;
+        }
+        let (score, reasons) = match_score(entry, &task_tokens, &catalog.entries);
         if score > 0 {
             selected.entry(entry.selector()).or_default().0 = score;
             selected
                 .entry(entry.selector())
                 .or_default()
                 .1
-                .insert("task match".to_string());
+                .extend(reasons);
         }
     }
     for selector in required {
@@ -259,6 +325,12 @@ fn resolve_inner(
         let candidate = selected.entry(selector.clone()).or_default();
         candidate.0 = u32::MAX;
         candidate.1.insert("explicit request".to_string());
+        if index
+            .get(selector)
+            .is_some_and(|entry| entry.trust == TrustLevel::Untrusted)
+        {
+            candidate.1.insert("explicit untrusted request".to_string());
+        }
     }
 
     let mut ranked = selected.into_iter().collect::<Vec<_>>();
@@ -301,11 +373,23 @@ fn resolve_inner(
 }
 
 pub fn hydrate(catalog: &Catalog, selectors: &[String]) -> SkillleafResult<Vec<HydratedEntry>> {
-    hydrate_inner(catalog, selectors)
+    hydrate_with_policy(catalog, selectors, false)
+}
+
+pub fn hydrate_with_policy(
+    catalog: &Catalog,
+    selectors: &[String],
+    allow_untrusted: bool,
+) -> SkillleafResult<Vec<HydratedEntry>> {
+    hydrate_inner(catalog, selectors, allow_untrusted)
         .map_err(|error| SkillleafError::Integrity(format!("{error:#}")))
 }
 
-fn hydrate_inner(catalog: &Catalog, selectors: &[String]) -> Result<Vec<HydratedEntry>> {
+fn hydrate_inner(
+    catalog: &Catalog,
+    selectors: &[String],
+    allow_untrusted: bool,
+) -> Result<Vec<HydratedEntry>> {
     let index = catalog
         .entries
         .iter()
@@ -320,6 +404,9 @@ fn hydrate_inner(catalog: &Catalog, selectors: &[String]) -> Result<Vec<Hydrated
         let entry = index
             .get(selector)
             .with_context(|| format!("selector is not in the catalog: {selector}"))?;
+        if entry.trust == TrustLevel::Untrusted && !allow_untrusted {
+            bail!("untrusted selector requires --allow-untrusted: {selector}");
+        }
         let root = catalog
             .roots
             .get(&root_key(&entry.source, entry.kind))
@@ -355,7 +442,8 @@ fn doctor_inner(catalog: &Catalog) -> Result<()> {
         .iter()
         .map(CatalogEntry::selector)
         .collect::<Vec<_>>();
-    hydrate_inner(catalog, &selectors)?;
+    hydrate_inner(catalog, &selectors, true)?;
+    inspect_catalog(catalog, true).map_err(anyhow::Error::msg)?;
     validate_dependencies(&catalog.entries)
 }
 
@@ -363,6 +451,7 @@ fn index_skills(
     source: &str,
     root: &Path,
     max_file_bytes: u64,
+    trust: TrustLevel,
     entries: &mut Vec<CatalogEntry>,
 ) -> Result<()> {
     for item in WalkDir::new(root).follow_links(false).sort_by_file_name() {
@@ -376,6 +465,7 @@ fn index_skills(
         let skill_path = item.path();
         let package_root = skill_path.parent().context("SKILL.md has no parent")?;
         let body = read_bounded_utf8(skill_path, max_file_bytes)?;
+        security::validate_instruction_text(skill_path, &body)?;
         let frontmatter = parse_frontmatter(&body);
         let default_name = package_root
             .strip_prefix(root)?
@@ -400,7 +490,12 @@ fn index_skills(
                 .unwrap_or_else(|| first_heading(&body)),
             root,
             skill_path,
-            dependencies,
+            EntryMetadata {
+                aliases: frontmatter.aliases,
+                trust,
+                capabilities: frontmatter.capabilities,
+                dependencies,
+            },
         )?);
 
         for resource in WalkDir::new(package_root)
@@ -416,6 +511,10 @@ fn index_skills(
                 continue;
             }
             let _ = read_bounded_utf8(resource.path(), max_file_bytes)?;
+            security::validate_instruction_text(
+                resource.path(),
+                &read_bounded_utf8(resource.path(), max_file_bytes)?,
+            )?;
             let relative = resource.path().strip_prefix(package_root)?;
             let resource_name = format!(
                 "{}/{}",
@@ -431,7 +530,12 @@ fn index_skills(
                 format!("Resource for skill {name}"),
                 root,
                 resource.path(),
-                Vec::new(),
+                EntryMetadata {
+                    aliases: Vec::new(),
+                    trust,
+                    capabilities: Vec::new(),
+                    dependencies: Vec::new(),
+                },
             )?);
         }
     }
@@ -442,6 +546,7 @@ fn index_commands(
     source: &str,
     root: &Path,
     max_file_bytes: u64,
+    trust: TrustLevel,
     entries: &mut Vec<CatalogEntry>,
 ) -> Result<()> {
     for item in WalkDir::new(root).follow_links(false).sort_by_file_name() {
@@ -453,6 +558,7 @@ fn index_commands(
             continue;
         }
         let body = read_bounded_utf8(item.path(), max_file_bytes)?;
+        security::validate_instruction_text(item.path(), &body)?;
         let frontmatter = parse_frontmatter(&body);
         let default_name = item
             .path()
@@ -476,10 +582,22 @@ fn index_commands(
                 .unwrap_or_else(|| first_heading(&body)),
             root,
             item.path(),
-            dependencies,
+            EntryMetadata {
+                aliases: frontmatter.aliases,
+                trust,
+                capabilities: frontmatter.capabilities,
+                dependencies,
+            },
         )?);
     }
     Ok(())
+}
+
+struct EntryMetadata {
+    aliases: Vec<String>,
+    trust: TrustLevel,
+    capabilities: Vec<String>,
+    dependencies: Vec<Dependency>,
 }
 
 fn make_entry(
@@ -489,9 +607,25 @@ fn make_entry(
     description: String,
     root: &Path,
     path: &Path,
-    dependencies: Vec<Dependency>,
+    metadata: EntryMetadata,
 ) -> Result<CatalogEntry> {
     let bytes = fs::read(path)?;
+    let EntryMetadata {
+        mut aliases,
+        trust,
+        mut capabilities,
+        dependencies,
+    } = metadata;
+    aliases
+        .iter()
+        .try_for_each(|alias| validate_entry_name(alias))?;
+    aliases.sort();
+    aliases.dedup();
+    capabilities
+        .iter()
+        .try_for_each(|capability| validate_capability(capability))?;
+    capabilities.sort();
+    capabilities.dedup();
     Ok(CatalogEntry {
         source: source.to_string(),
         kind,
@@ -503,6 +637,9 @@ fn make_entry(
             .replace(std::path::MAIN_SEPARATOR, "/"),
         content_sha256: sha256(&bytes),
         bytes: bytes.len() as u64,
+        aliases,
+        trust,
+        capabilities,
         dependencies,
     })
 }
@@ -593,24 +730,33 @@ fn parse_frontmatter(body: &str) -> Frontmatter {
 
 fn parse_frontmatter_fields(yaml: &str) -> Frontmatter {
     let mut frontmatter = Frontmatter::default();
-    let mut reading_dependencies = false;
+    let mut list = None;
     for line in yaml.lines() {
         let trimmed = line.trim();
         if let Some(value) = trimmed.strip_prefix("name:") {
             frontmatter.name = nonempty_scalar(value);
-            reading_dependencies = false;
+            list = None;
         } else if let Some(value) = trimmed.strip_prefix("description:") {
             frontmatter.description = nonempty_scalar(value);
-            reading_dependencies = false;
+            list = None;
         } else if trimmed == "dependencies:" {
-            reading_dependencies = true;
-        } else if reading_dependencies {
+            list = Some("dependencies");
+        } else if trimmed == "aliases:" {
+            list = Some("aliases");
+        } else if trimmed == "capabilities:" {
+            list = Some("capabilities");
+        } else if let Some(active) = list {
             if let Some(value) = trimmed.strip_prefix('-') {
                 if let Some(value) = nonempty_scalar(value) {
-                    frontmatter.dependencies.push(value);
+                    match active {
+                        "dependencies" => frontmatter.dependencies.push(value),
+                        "aliases" => frontmatter.aliases.push(value),
+                        "capabilities" => frontmatter.capabilities.push(value),
+                        _ => unreachable!(),
+                    }
                 }
             } else if !trimmed.is_empty() {
-                reading_dependencies = false;
+                list = None;
             }
         }
     }
@@ -635,42 +781,24 @@ fn compact_description(value: &str) -> String {
     compact.chars().take(240).collect()
 }
 
-fn tokens(value: &str) -> BTreeSet<String> {
-    const STOP: &[&str] = &[
-        "about", "agent", "and", "for", "from", "into", "skill", "skills", "the", "this", "use",
-        "when", "with",
-    ];
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .filter(|token| token.len() >= 3 && !STOP.contains(token))
-        .map(ToOwned::to_owned)
-        .collect()
+fn validate_capability(value: &str) -> Result<()> {
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        bail!("capabilities must contain only letters, numbers, '-' or '_': {value}");
+    }
+    Ok(())
 }
 
-fn match_score(entry: &CatalogEntry, task_tokens: &BTreeSet<String>) -> u32 {
-    let name_tokens = tokens(&entry.name);
-    let description_tokens = tokens(&entry.description);
-    let name_matches = task_tokens
-        .iter()
-        .filter(|token| name_tokens.contains(*token))
-        .count() as u32;
-    let description_matches = task_tokens
-        .iter()
-        .filter(|token| description_tokens.contains(*token))
-        .count() as u32;
-    if name_matches == 0 && description_matches < 2 {
-        0
+fn source_trust(source: &str, kind: EntryKind, options: &BuildOptions) -> TrustLevel {
+    if options.untrusted_sources.contains(source)
+        || options.untrusted_roots.contains(&root_key(source, kind))
+    {
+        TrustLevel::Untrusted
     } else {
-        name_matches * 12 + description_matches * 2
+        TrustLevel::Trusted
     }
 }
 
@@ -773,6 +901,15 @@ fn catalog_hash(roots: &BTreeMap<String, String>, entries: &[CatalogEntry]) -> R
     })?))
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+pub(crate) fn sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        for nibble in [byte >> 4, byte & 0x0f] {
+            if let Some(character) = char::from_digit(nibble as u32, 16) {
+                output.push(character);
+            }
+        }
+    }
+    output
 }

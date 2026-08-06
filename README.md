@@ -13,7 +13,8 @@ Without a router, an agent host may place the complete skill library in the prom
 1. `index` creates an ordered, hash-verified catalogue.
 2. `resolve` selects a bounded skill and command dependency closure.
 3. `read --many` hydrates those bodies in one process.
-4. `doctor` checks every path, dependency and body hash.
+4. `eval` checks routing against deterministic fixtures.
+5. `doctor` checks every path, dependency, body hash and trust boundary.
 
 The ordered index uses Rust's B-tree maps for reproducible output. The speed comes from doing less work and reading selected files together, not from claiming that a B-tree makes Markdown parsing magically faster.
 
@@ -44,6 +45,20 @@ skillleaf stats --format text
 skillleaf doctor
 ```
 
+Use a named domain when work, home, customer or project libraries must remain isolated:
+
+```sh
+skillleaf domain add work \
+  --catalog "$HOME/.local/share/skillleaf/domains/work/catalog.json" \
+  --registry "$HOME/.config/skillleaf/domains.json"
+
+export SKILLLEAF_DOMAIN=work
+export SKILLLEAF_REGISTRY="$HOME/.config/skillleaf/domains.json"
+skillleaf resolve --task "review this release"
+```
+
+Skill-Leaf opens exactly one catalogue for a request. It never merges domain entries, descriptions, usage ledgers or account labels during routing.
+
 The repository also includes a compact host-neutral router skill at [`skills/skillleaf/SKILL.md`](skills/skillleaf/SKILL.md). Install or link that one skill in your agent host. Keep the larger skill library outside the prompt.
 
 ## Install
@@ -65,85 +80,31 @@ Skill-Leaf does not change Claude Code, Codex, OpenCode or your skill folders du
 
 ## Migrate an existing library safely
 
-Do not delete your current skills or commands. Back them up, copy them into a host-neutral library, verify the copy, then remove the originals from the host's discovery path only after a fresh session proves the router works.
-
-### macOS and Linux
-
-This example uses Claude Code folders. Repeat the copy for any other host-specific library you want Skill-Leaf to route.
+Migration is a three-step, receipt-backed operation. Planning snapshots every source file. Apply refuses source drift, copies into a new domain, verifies the resulting catalogue, installs one compact router adapter and writes a rollback receipt. It never deletes or moves the original skill or command folders.
 
 ```sh
-skillleaf_root="$HOME/.local/share/skillleaf"
-backup_root="$HOME/.local/share/skillleaf-backups/$(date +%Y%m%d-%H%M%S)"
+skillleaf migrate plan \
+  --skills personal="$HOME/.claude/skills" \
+  --commands personal="$HOME/.claude/commands" \
+  --destination "$HOME/.local/share/skillleaf" \
+  --domain work \
+  --registry "$HOME/.config/skillleaf/domains.json" \
+  --host claude \
+  --host-root "$HOME/.claude" \
+  --output migration-plan.json
 
-mkdir -p "$skillleaf_root/library/claude-skills" \
-  "$skillleaf_root/library/claude-commands" \
-  "$backup_root/claude-skills" \
-  "$backup_root/claude-commands"
-cp -R "$HOME/.claude/skills/." "$backup_root/claude-skills/"
-cp -R "$HOME/.claude/commands/." "$backup_root/claude-commands/"
-cp -R "$HOME/.claude/skills/." "$skillleaf_root/library/claude-skills/"
-cp -R "$HOME/.claude/commands/." "$skillleaf_root/library/claude-commands/"
-tar -czf "$backup_root/claude-library.tar.gz" \
-  -C "$backup_root" claude-skills claude-commands
+skillleaf migrate apply \
+  --plan migration-plan.json \
+  --receipt migration-receipt.json
 
-skillleaf index \
-  --skills personal="$skillleaf_root/library/claude-skills" \
-  --commands personal="$skillleaf_root/library/claude-commands" \
-  --output "$skillleaf_root/catalog.json"
-
-SKILLLEAF_CATALOG="$skillleaf_root/catalog.json" skillleaf doctor
+skillleaf doctor \
+  --domain work \
+  --registry "$HOME/.config/skillleaf/domains.json"
 ```
 
-Run the command-line verification below before changing the host. For cutover, move the original active skill directory to a recoverable name outside the host's discovery path, create a new empty active directory, then copy `skills/skillleaf/SKILL.md` into a `skillleaf` folder beneath it. Start a clean agent session and confirm it follows the router. Restore the renamed directory immediately if it does not.
+Native slash-command files remain in the host's command directory, so `/commands` continue to work. To undo the migration, run `skillleaf migrate rollback --receipt migration-receipt.json`. Rollback refuses to remove anything if the copied domain, adapter or registry changed after apply; review those changes rather than losing them.
 
-Host-native slash commands are a separate boundary. Moving a command file out of the host's discovery path may remove that `/command` from the host interface. Leave commands that must remain directly invokable in their native directory; Skill-Leaf can route their instruction bodies, but it does not register host UI commands.
-
-### Windows PowerShell
-
-```powershell
-$SkillleafRoot = Join-Path $env:LOCALAPPDATA "Skill-Leaf"
-$BackupRoot = Join-Path $SkillleafRoot ("backups\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-New-Item -ItemType Directory -Force "$SkillleafRoot\library", $BackupRoot | Out-Null
-Copy-Item -Recurse -Force "$HOME\.claude\skills" "$BackupRoot\claude-skills"
-Copy-Item -Recurse -Force "$HOME\.claude\commands" "$BackupRoot\claude-commands"
-Copy-Item -Recurse -Force "$HOME\.claude\skills" "$SkillleafRoot\library\claude-skills"
-Copy-Item -Recurse -Force "$HOME\.claude\commands" "$SkillleafRoot\library\claude-commands"
-Compress-Archive -Force \
-  -Path "$BackupRoot\claude-skills", "$BackupRoot\claude-commands" \
-  -DestinationPath "$BackupRoot\claude-library.zip"
-
-skillleaf index `
-  --skills "personal=$SkillleafRoot\library\claude-skills" `
-  --commands "personal=$SkillleafRoot\library\claude-commands" `
-  --output "$SkillleafRoot\catalog.json"
-
-$env:SKILLLEAF_CATALOG = "$SkillleafRoot\catalog.json"
-$env:SKILLLEAF_USAGE_FILE = "$SkillleafRoot\usage.json"
-skillleaf doctor
-```
-
-Persist the two environment variables using your shell, agent launcher or user environment settings. Avoid placing them in a repository that other people can clone.
-
-## Verify before switching over
-
-Use a task that should select a known skill:
-
-```sh
-skillleaf resolve --task "review and finish this code change"
-skillleaf read --many personal/skill:critical-review
-skillleaf stats --format text
-skillleaf doctor
-```
-
-Confirm five things before moving the original folders out of the host discovery path:
-
-1. `resolve` returns the expected skill rather than an unrelated name match.
-2. Linked Markdown references appear in the selected dependency closure.
-3. `read --many` returns every selected body in one process.
-4. `doctor` passes after the source folders are copied to their final location.
-5. A clean agent session follows the router skill without preloading the old library.
-
-Rollback is simply restoring the backed-up folders to the host's discovery path and starting a new session. The catalogue and usage ledger can remain on disk because the host does not read them without the adapter.
+The same commands work in PowerShell with native Windows paths. No shell-specific copy, archive or symlink command is required.
 
 ## Expected benefit
 
@@ -163,20 +124,25 @@ The host must honour the router workflow for these savings to appear. Skill-Leaf
 
 Skill roots contain folders with a `SKILL.md`. Markdown files beneath the same folder become separately addressable resources. Relative Markdown links from `SKILL.md` become verified dependencies.
 
-Command roots contain Markdown files. Optional frontmatter supports a name, description and explicit dependencies:
+Command roots contain Markdown files. Optional frontmatter supports a name, description, deterministic aliases, declared capabilities and explicit dependencies:
 
 ```yaml
 ---
 name: finish
 description: Finish a change with review and verification.
+aliases:
+  - release-finish
+capabilities:
+  - shell
+  - write
 dependencies:
   - personal/skill:critical-review
 ---
 ```
 
-Skill-Leaf deliberately supports this small frontmatter surface. The parser is line-based, deterministic and tolerant of common human-written descriptions that strict YAML parsers reject.
+Exact name and alias matches always outrank typo recovery. Typo recovery allows one edit only for tokens of at least five ASCII characters, and only when exactly one trusted entry matches. Ambiguous typos select nothing. Explicit `--require` selectors remain exact.
 
-Relative Markdown links and explicit `dependencies` form the verified chain. Arbitrary `@file` references are not parsed in version 0.1.0; convert important ones to Markdown links or explicit selectors so missing references fail during indexing.
+Relative Markdown links and explicit `dependencies` form the verified chain. Arbitrary `@file` references are not parsed in version 0.2.0; convert important ones to Markdown links or explicit selectors so missing references fail during indexing.
 
 ## Security boundaries
 
@@ -188,10 +154,25 @@ Relative Markdown links and explicit `dependencies` form the verified chain. Arb
 - Prompts, code and credentials stay on the computer.
 - Optional usage counts store selectors, hashes, counts and timestamps locally. They never store prompts or task text.
 - Skill-Leaf reads instructions. It does not execute bundled scripts.
+- Hidden control characters and bidirectional display overrides are rejected while indexing.
+- Sources indexed with `--untrusted-skills` or `--untrusted-commands` cannot route automatically. They require an exact `--require` and `read --allow-untrusted`.
+- `capabilities` declarations make requested shell, network, write, secret and deployment authority inspectable; they are evidence, not a sandbox.
+
+Static checks cannot prove that natural-language instructions are harmless. Treat downloaded skills as untrusted, review their hashes and declared capabilities, and use the host's permission boundary for tool execution.
+
+## Measure routing quality
+
+Evaluation fixtures are ordinary JSON and contain task summaries plus expected and forbidden selectors. They contain no prompts or skill bodies. Start with [`examples/eval.json`](examples/eval.json):
+
+```sh
+skillleaf eval --catalog skillleaf.json --suite examples/eval.json
+```
+
+The command reports per-case misses, forbidden selections, recall and precision, then exits non-zero when the suite or configured thresholds fail. This makes description, alias and router changes testable before deployment.
 
 ## Deliberate limits
 
-Skill-Leaf does not install skills, modify agent settings or infer private workflow policy. It does not use fuzzy matching, embeddings or an LLM. Deterministic lexical routing is the dependable first path; future rerankers can sit above it without weakening hashes, containment or explicit dependencies.
+Skill-Leaf does not execute skills, grant tool permissions or infer private workflow policy. It does not use regex routing, embeddings or an LLM. Deterministic lexical routing is the dependable first path; bounded unique typo recovery only runs after exact name and alias matching.
 
 ## Use it with an agent
 

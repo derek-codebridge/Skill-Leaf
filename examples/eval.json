@@ -1,0 +1,13 @@
+{
+  "schema": "skillleaf.eval.v1",
+  "min_recall": 1.0,
+  "min_precision": 0.5,
+  "cases": [
+    {
+      "name": "review-change",
+      "task": "review and finish this code change",
+      "expect": ["example/skill:review", "example/command:finish"],
+      "reject": ["example/skill:helper"]
+    }
+  ]
+}

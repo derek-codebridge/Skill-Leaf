@@ -1,7 +1,8 @@
 use skillleaf::{
-    EntryKind, SourceRoot, build_catalog, doctor, hydrate, load_catalog, resolve,
-    write_catalog_atomic,
+    BuildOptions, EntryKind, SourceRoot, build_catalog, build_catalog_with_options, doctor,
+    hydrate, hydrate_with_policy, load_catalog, resolve, write_catalog_atomic,
 };
+use std::collections::BTreeSet;
 use std::fs;
 use tempfile::TempDir;
 
@@ -122,7 +123,9 @@ fn missing_dependency_is_rejected_during_indexing() -> anyhow::Result<()> {
 #[test]
 fn doctor_verifies_the_complete_fixture() -> anyhow::Result<()> {
     let (_temp, path) = fixture()?;
-    doctor(&load_catalog(&path)?)?;
+    let catalog = load_catalog(&path)?;
+    doctor(&catalog)?;
+    assert!(!catalog.entries.is_empty());
     Ok(())
 }
 
@@ -201,5 +204,212 @@ fn symlinked_skill_bodies_are_not_indexed() -> anyhow::Result<()> {
         256 * 1024,
     )?;
     assert!(catalog.entries.is_empty());
+    Ok(())
+}
+
+#[test]
+fn aliases_and_unique_typos_route_deterministically() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("skills/review"))?;
+    fs::write(
+        temp.path().join("skills/review/SKILL.md"),
+        "---\nname: critical-review\ndescription: Inspect a change before release.\naliases:\n  - adversarial-review\n---\n",
+    )?;
+    let catalog = build_catalog(
+        &[SourceRoot {
+            name: "local".to_string(),
+            kind: EntryKind::Skill,
+            path: temp.path().join("skills"),
+        }],
+        256 * 1024,
+    )?;
+    let exact = resolve(&catalog, "run adversarial review", &[], 8)?;
+    assert_eq!(exact.selected[0].selector, "local/skill:critical-review");
+    assert!(
+        exact.selected[0]
+            .reasons
+            .contains(&"exact alias match".to_string())
+    );
+
+    let typo = resolve(&catalog, "run adversarail", &[], 8)?;
+    assert_eq!(typo.selected[0].selector, "local/skill:critical-review");
+    assert!(
+        typo.selected[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.starts_with("unique typo match"))
+    );
+    Ok(())
+}
+
+#[test]
+fn ambiguous_typo_does_not_auto_route() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    for name in ["deploy", "deplox"] {
+        fs::create_dir_all(temp.path().join("skills").join(name))?;
+        fs::write(
+            temp.path().join("skills").join(name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: A distinct capability.\n---\n"),
+        )?;
+    }
+    let catalog = build_catalog(
+        &[SourceRoot {
+            name: "local".to_string(),
+            kind: EntryKind::Skill,
+            path: temp.path().join("skills"),
+        }],
+        256 * 1024,
+    )?;
+    assert!(resolve(&catalog, "deplow", &[], 8)?.selected.is_empty());
+    Ok(())
+}
+
+#[test]
+fn alias_collisions_fail_closed() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    for name in ["one", "two"] {
+        fs::create_dir_all(temp.path().join("skills").join(name))?;
+        fs::write(
+            temp.path().join("skills").join(name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Fixture.\naliases:\n  - shared-alias\n---\n"),
+        )?;
+    }
+    let error = build_catalog(
+        &[SourceRoot {
+            name: "local".to_string(),
+            kind: EntryKind::Skill,
+            path: temp.path().join("skills"),
+        }],
+        256 * 1024,
+    )
+    .expect_err("ambiguous aliases must fail");
+    assert!(error.to_string().contains("routing alias collision"));
+    Ok(())
+}
+
+#[test]
+fn untrusted_sources_require_explicit_selection_and_hydration() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("skills/remote"))?;
+    fs::write(
+        temp.path().join("skills/remote/SKILL.md"),
+        "---\nname: remote\ndescription: Deploy remote infrastructure safely.\n---\n",
+    )?;
+    let catalog = build_catalog_with_options(
+        &[SourceRoot {
+            name: "downloaded".to_string(),
+            kind: EntryKind::Skill,
+            path: temp.path().join("skills"),
+        }],
+        256 * 1024,
+        &BuildOptions {
+            untrusted_sources: BTreeSet::from(["downloaded".to_string()]),
+            ..BuildOptions::default()
+        },
+    )?;
+    assert!(
+        resolve(&catalog, "deploy remote infrastructure", &[], 8)?
+            .selected
+            .is_empty()
+    );
+    let selector = "downloaded/skill:remote".to_string();
+    assert_eq!(
+        resolve(&catalog, "deploy", std::slice::from_ref(&selector), 8)?.selected[0].selector,
+        selector
+    );
+    assert!(hydrate(&catalog, std::slice::from_ref(&selector)).is_err());
+    assert_eq!(
+        hydrate_with_policy(&catalog, std::slice::from_ref(&selector), true)?.len(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn trusted_default_keeps_catalog_serialization_backwards_compatible() -> anyhow::Result<()> {
+    let (_temp, catalog_path) = fixture()?;
+    let catalog = load_catalog(&catalog_path)?;
+    let encoded = serde_json::to_value(&catalog)?;
+    assert!(
+        encoded["entries"]
+            .as_array()
+            .expect("catalog entries")
+            .iter()
+            .all(|entry| entry.get("trust").is_none())
+    );
+    Ok(())
+}
+
+#[test]
+fn untrusted_root_does_not_taint_same_named_sibling_kind() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("skills/review"))?;
+    fs::create_dir_all(temp.path().join("commands"))?;
+    fs::write(
+        temp.path().join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review changes.\n---\n",
+    )?;
+    fs::write(
+        temp.path().join("commands/finish.md"),
+        "---\nname: finish\ndescription: Finish changes.\n---\n",
+    )?;
+    let catalog = build_catalog_with_options(
+        &[
+            SourceRoot {
+                name: "personal".to_string(),
+                kind: EntryKind::Skill,
+                path: temp.path().join("skills"),
+            },
+            SourceRoot {
+                name: "personal".to_string(),
+                kind: EntryKind::Command,
+                path: temp.path().join("commands"),
+            },
+        ],
+        256 * 1024,
+        &BuildOptions {
+            untrusted_roots: BTreeSet::from(["personal/skill".to_string()]),
+            ..BuildOptions::default()
+        },
+    )?;
+    assert_eq!(
+        catalog
+            .entries
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Command)
+            .expect("command entry")
+            .trust,
+        skillleaf::TrustLevel::Trusted
+    );
+    assert_eq!(
+        catalog
+            .entries
+            .iter()
+            .find(|entry| entry.kind == EntryKind::Skill)
+            .expect("skill entry")
+            .trust,
+        skillleaf::TrustLevel::Untrusted
+    );
+    Ok(())
+}
+
+#[test]
+fn hidden_direction_overrides_are_rejected() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("skills/unsafe"))?;
+    fs::write(
+        temp.path().join("skills/unsafe/SKILL.md"),
+        "---\nname: unsafe\ndescription: Hidden text.\n---\nDo this \u{202e}instead.",
+    )?;
+    let error = build_catalog(
+        &[SourceRoot {
+            name: "local".to_string(),
+            kind: EntryKind::Skill,
+            path: temp.path().join("skills"),
+        }],
+        256 * 1024,
+    )
+    .expect_err("display-spoofing control must fail");
+    assert!(error.to_string().contains("bidirectional override"));
     Ok(())
 }
