@@ -5,11 +5,11 @@ labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: Thanks for helping us make Skillleaf more dependable. Do not include private skill bodies, credentials or customer material.
+      value: Thanks for helping us make Skill-Leaf more dependable. Do not include private skill bodies, credentials or customer material.
   - type: input
     id: version
     attributes:
-      label: Skillleaf version
+      label: Skill-Leaf version
       placeholder: skillleaf 0.1.0
     validations:
       required: true

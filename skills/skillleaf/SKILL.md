@@ -2,9 +2,9 @@
 name: skillleaf
 description: Route large local agent skill and command libraries without loading every body into context. Use when starting a task, selecting skills, reducing skill tokens, or hydrating several related instructions.
 ---
-# Skillleaf router
+# Skill-Leaf router
 
-Use the local Skillleaf binary before loading capability instructions.
+Use the local Skill-Leaf binary before loading capability instructions.
 
 1. Summarise the current task in one concrete sentence.
 2. Run `skillleaf resolve --task "<summary>"`.

@@ -1,14 +1,14 @@
-# Skillleaf
+# Skill-Leaf
 
 Most coding agents load every available skill description before the work begins. Some load entire skill bodies. It works, but it can spend hundreds of thousands of tokens explaining capabilities the agent never uses.
 
-Skillleaf keeps those files on your computer. A small Rust binary builds a verified catalogue, selects the few entries relevant to the task, follows their linked references, then reads the selected bodies in one call. No model. No remote service. No MCP server.
+Skill-Leaf keeps those files on your computer. A small Rust binary builds a verified catalogue, selects the few entries relevant to the task, follows their linked references, then reads the selected bodies in one call. No model. No remote service. No MCP server.
 
-We built Skillleaf for [Codebridge.com.au](https://codebridge.com.au) because our own agents had reached hundreds of skills and commands. We are releasing the router so other developers can test it, improve it and spend fewer tokens on repeated setup.
+We built Skill-Leaf for [Codebridge.com.au](https://codebridge.com.au) because our own agents had reached hundreds of skills and commands. We are releasing the router so other developers can test it, improve it and spend fewer tokens on repeated setup.
 
 ## What it changes
 
-Without a router, an agent host may place the complete skill library in the prompt. Skillleaf leaves the library on disk and returns a small receipt:
+Without a router, an agent host may place the complete skill library in the prompt. Skill-Leaf leaves the library on disk and returns a small receipt:
 
 1. `index` creates an ordered, hash-verified catalogue.
 2. `resolve` selects a bounded skill and command dependency closure.
@@ -19,7 +19,7 @@ The ordered index uses Rust's B-tree maps for reproducible output. The speed com
 
 ## Measured result
 
-We tested Skillleaf against one real local library with 382 entries and 3.34 MB of Markdown. A representative pull request review selected 101 KB, leaving about 3.24 MB out of the prompt. Using a rough four-bytes-per-token estimate, that avoided approximately 810,000 input tokens for that request.
+We tested Skill-Leaf against one real local library with 382 entries and 3.34 MB of Markdown. A representative pull request review selected 101 KB, leaving about 3.24 MB out of the prompt. Using a rough four-bytes-per-token estimate, that avoided approximately 810,000 input tokens for that request.
 
 Across 20 warm runs on an Apple Silicon development machine, resolution averaged 4.8 ms and hydration of eight bodies averaged 4.3 ms. Rebuilding the full catalogue averaged 96.6 ms across 10 runs.
 
@@ -58,10 +58,10 @@ skillleaf --help
 After the repository is public, Cargo can install the same source directly:
 
 ```sh
-cargo install --git https://github.com/derek-codebridge/skillleaf --locked
+cargo install --git https://github.com/derek-codebridge/Skill-Leaf --locked
 ```
 
-Skillleaf does not change Claude Code, Codex, OpenCode or your skill folders during installation. That is deliberate. Migration stays visible and reversible.
+Skill-Leaf does not change Claude Code, Codex, OpenCode or your skill folders during installation. That is deliberate. Migration stays visible and reversible.
 
 ## Migrate an existing library safely
 
@@ -69,7 +69,7 @@ Do not delete your current skills or commands. Back them up, copy them into a ho
 
 ### macOS and Linux
 
-This example uses Claude Code folders. Repeat the copy for any other host-specific library you want Skillleaf to route.
+This example uses Claude Code folders. Repeat the copy for any other host-specific library you want Skill-Leaf to route.
 
 ```sh
 skillleaf_root="$HOME/.local/share/skillleaf"
@@ -96,12 +96,12 @@ SKILLLEAF_CATALOG="$skillleaf_root/catalog.json" skillleaf doctor
 
 Run the command-line verification below before changing the host. For cutover, move the original active skill directory to a recoverable name outside the host's discovery path, create a new empty active directory, then copy `skills/skillleaf/SKILL.md` into a `skillleaf` folder beneath it. Start a clean agent session and confirm it follows the router. Restore the renamed directory immediately if it does not.
 
-Host-native slash commands are a separate boundary. Moving a command file out of the host's discovery path may remove that `/command` from the host interface. Leave commands that must remain directly invokable in their native directory; Skillleaf can route their instruction bodies, but it does not register host UI commands.
+Host-native slash commands are a separate boundary. Moving a command file out of the host's discovery path may remove that `/command` from the host interface. Leave commands that must remain directly invokable in their native directory; Skill-Leaf can route their instruction bodies, but it does not register host UI commands.
 
 ### Windows PowerShell
 
 ```powershell
-$SkillleafRoot = Join-Path $env:LOCALAPPDATA "Skillleaf"
+$SkillleafRoot = Join-Path $env:LOCALAPPDATA "Skill-Leaf"
 $BackupRoot = Join-Path $SkillleafRoot ("backups\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
 New-Item -ItemType Directory -Force "$SkillleafRoot\library", $BackupRoot | Out-Null
 Copy-Item -Recurse -Force "$HOME\.claude\skills" "$BackupRoot\claude-skills"
@@ -147,7 +147,7 @@ Rollback is simply restoring the backed-up folders to the host's discovery path 
 
 ## Expected benefit
 
-Skillleaf helps when the host would otherwise preload a large skill and command library. In that shape, users should see:
+Skill-Leaf helps when the host would otherwise preload a large skill and command library. In that shape, users should see:
 
 - smaller session-start prompts because only the router description is always visible;
 - lower input-token use because irrelevant bodies stay on disk;
@@ -157,7 +157,7 @@ Skillleaf helps when the host would otherwise preload a large skill and command 
 - one catalogue shared across Claude Code, Codex, OpenCode, CI and custom agent runners;
 - local usage evidence showing which entries earn maintenance and which never get hydrated.
 
-The host must honour the router workflow for these savings to appear. Skillleaf cannot stop a host from preloading files that remain in its own discovery directory. Measure a clean session before and after migration rather than assuming the result.
+The host must honour the router workflow for these savings to appear. Skill-Leaf cannot stop a host from preloading files that remain in its own discovery directory. Measure a clean session before and after migration rather than assuming the result.
 
 ## Supported layout
 
@@ -174,7 +174,7 @@ dependencies:
 ---
 ```
 
-Skillleaf deliberately supports this small frontmatter surface. The parser is line-based, deterministic and tolerant of common human-written descriptions that strict YAML parsers reject.
+Skill-Leaf deliberately supports this small frontmatter surface. The parser is line-based, deterministic and tolerant of common human-written descriptions that strict YAML parsers reject.
 
 Relative Markdown links and explicit `dependencies` form the verified chain. Arbitrary `@file` references are not parsed in version 0.1.0; convert important ones to Markdown links or explicit selectors so missing references fail during indexing.
 
@@ -187,11 +187,11 @@ Relative Markdown links and explicit `dependencies` form the verified chain. Arb
 - Source collisions and missing dependencies are errors.
 - Prompts, code and credentials stay on the computer.
 - Optional usage counts store selectors, hashes, counts and timestamps locally. They never store prompts or task text.
-- Skillleaf reads instructions. It does not execute bundled scripts.
+- Skill-Leaf reads instructions. It does not execute bundled scripts.
 
 ## Deliberate limits
 
-Skillleaf does not install skills, modify agent settings or infer private workflow policy. It does not use fuzzy matching, embeddings or an LLM. Deterministic lexical routing is the dependable first path; future rerankers can sit above it without weakening hashes, containment or explicit dependencies.
+Skill-Leaf does not install skills, modify agent settings or infer private workflow policy. It does not use fuzzy matching, embeddings or an LLM. Deterministic lexical routing is the dependable first path; future rerankers can sit above it without weakening hashes, containment or explicit dependencies.
 
 ## Use it with an agent
 
@@ -212,8 +212,8 @@ Counting happens only after a body passes hash and containment checks. Concurren
 
 ## Licence
 
-Skillleaf is source-available under the [MIT License with the Commons Clause License Condition v1.0](LICENSE). It is not OSI open source because selling substantially the same software is restricted.
+Skill-Leaf is source-available under the [MIT License with the Commons Clause License Condition v1.0](LICENSE). It is not OSI open source because selling substantially the same software is restricted.
 
-Individuals and businesses may use, modify and run Skillleaf, including for internal commercial work. Selling Skillleaf itself, a lightly modified substitute, or a paid service whose value derives substantially from Skillleaf requires a [separate commercial licence](COMMERCIAL-LICENCE.md).
+Individuals and businesses may use, modify and run Skill-Leaf, including for internal commercial work. Selling Skill-Leaf itself, a lightly modified substitute, or a paid service whose value derives substantially from Skill-Leaf requires a [separate commercial licence](COMMERCIAL-LICENCE.md).
 
 Contributions are welcome under the [contribution terms](CONTRIBUTOR-LICENCE-AGREEMENT.md). Names and branding remain subject to the [trademark policy](TRADEMARKS.md).

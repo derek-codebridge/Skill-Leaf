@@ -1,6 +1,6 @@
 # Contributor licence agreement
 
-We welcome fixes, tests, documentation and well-bounded improvements. We also use Skillleaf as part of commercial Codebridge products, so accepted contributions need clear licensing terms.
+We welcome fixes, tests, documentation and well-bounded improvements. We also use Skill-Leaf as part of commercial Codebridge products, so accepted contributions need clear licensing terms.
 
 Submitting a pull request means you confirm all of the following:
 

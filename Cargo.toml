@@ -6,7 +6,7 @@ description = "Local-first deterministic routing and lazy hydration for AI agent
 license-file = "LICENSE"
 documentation = "https://docs.rs/skillleaf"
 homepage = "https://codebridge.com.au"
-repository = "https://github.com/derek-codebridge/skillleaf"
+repository = "https://github.com/derek-codebridge/Skill-Leaf"
 keywords = ["ai", "agents", "skills", "cli", "context"]
 categories = ["command-line-utilities", "development-tools"]
 
