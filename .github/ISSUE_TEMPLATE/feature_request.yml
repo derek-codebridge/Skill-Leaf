@@ -1,0 +1,35 @@
+name: Improvement proposal
+description: Propose a measured improvement to routing, integrity, compatibility or token use.
+title: "[Proposal]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What repeated cost, missed route or failure does this address?
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Include timings, corpus shape, reproduction or other evidence where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Explain the smallest dependable change and its compatibility impact.
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Boundaries
+      options:
+        - label: The proposal keeps the default path local and deterministic.
+          required: true
+        - label: I have not included private skills, credentials or customer data.
+          required: true

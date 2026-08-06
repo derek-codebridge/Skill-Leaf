@@ -3,14 +3,17 @@ name = "skillleaf"
 version = "0.1.0"
 edition = "2024"
 description = "Local-first deterministic routing and lazy hydration for AI agent skills"
-license = "MIT"
+license-file = "LICENSE"
 documentation = "https://docs.rs/skillleaf"
+homepage = "https://codebridge.com.au"
+repository = "https://github.com/derek-codebridge/skillleaf"
 keywords = ["ai", "agents", "skills", "cli", "context"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0"
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+fs2 = "0.4"
 pulldown-cmark = "0.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

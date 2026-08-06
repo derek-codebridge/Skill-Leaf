@@ -8,6 +8,10 @@ use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
+mod usage;
+
+pub use usage::{UsageEntry, UsageReport, record_hydrations, usage_report};
+
 pub const CATALOG_SCHEMA: &str = "skillleaf.catalog.v1";
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 256 * 1024;
 

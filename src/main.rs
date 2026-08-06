@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use skillleaf::{
     DEFAULT_MAX_FILE_BYTES, EntryKind, SourceRoot, build_catalog, doctor, hydrate, load_catalog,
-    resolve, write_catalog_atomic,
+    record_hydrations, resolve, usage_report, write_catalog_atomic,
 };
 use std::path::PathBuf;
 
@@ -31,7 +31,12 @@ enum Command {
     },
     /// Select a bounded skill/command dependency closure for a task.
     Resolve {
-        #[arg(short, long, default_value = "skillleaf.json")]
+        #[arg(
+            short,
+            long,
+            env = "SKILLLEAF_CATALOG",
+            default_value = "skillleaf.json"
+        )]
         catalog: PathBuf,
         #[arg(long)]
         task: String,
@@ -44,17 +49,44 @@ enum Command {
     },
     /// Hydrate one or more selected bodies in a single process.
     Read {
-        #[arg(short, long, default_value = "skillleaf.json")]
+        #[arg(
+            short,
+            long,
+            env = "SKILLLEAF_CATALOG",
+            default_value = "skillleaf.json"
+        )]
         catalog: PathBuf,
         #[arg(long = "many", value_delimiter = ',', required = true)]
         selectors: Vec<String>,
+        /// Optional local ledger. No prompts, task text, or source paths are recorded.
+        #[arg(long, env = "SKILLLEAF_USAGE_FILE")]
+        usage_file: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
     },
     /// Verify the catalog, every body hash, dependency, and containment boundary.
     Doctor {
-        #[arg(short, long, default_value = "skillleaf.json")]
+        #[arg(
+            short,
+            long,
+            env = "SKILLLEAF_CATALOG",
+            default_value = "skillleaf.json"
+        )]
         catalog: PathBuf,
+    },
+    /// Report local hydration counts, including catalogue entries never hydrated.
+    Stats {
+        #[arg(
+            short,
+            long,
+            env = "SKILLLEAF_CATALOG",
+            default_value = "skillleaf.json"
+        )]
+        catalog: PathBuf,
+        #[arg(long, env = "SKILLLEAF_USAGE_FILE")]
+        usage_file: PathBuf,
+        #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
+        format: OutputFormat,
     },
 }
 
@@ -117,9 +149,13 @@ fn run() -> Result<()> {
         Command::Read {
             catalog,
             selectors,
+            usage_file,
             format,
         } => {
             let hydrated = hydrate(&load_catalog(&catalog)?, &selectors)?;
+            if let Some(path) = usage_file {
+                record_hydrations(&path, &hydrated)?;
+            }
             match format {
                 OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&hydrated)?),
                 OutputFormat::Text => {
@@ -134,6 +170,21 @@ fn run() -> Result<()> {
             let catalog = load_catalog(&catalog)?;
             doctor(&catalog)?;
             println!("PASS: {} entries verified", catalog.entries.len());
+        }
+        Command::Stats {
+            catalog,
+            usage_file,
+            format,
+        } => {
+            let report = usage_report(&load_catalog(&catalog)?, &usage_file)?;
+            match format {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+                OutputFormat::Text => {
+                    for entry in report.entries {
+                        println!("{}\t{}", entry.hydrate_count, entry.selector);
+                    }
+                }
+            }
         }
     }
     Ok(())

@@ -1,0 +1,40 @@
+name: Bug report
+description: Report reproducible incorrect behaviour, failure or security boundary issue.
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping us make Skillleaf more dependable. Do not include private skill bodies, credentials or customer material.
+  - type: input
+    id: version
+    attributes:
+      label: Skillleaf version
+      placeholder: skillleaf 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options: [macOS, Linux, Windows, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Include the smallest safe catalogue layout and command that reproduces the issue.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and observed result
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Safe diagnostic output
+      description: Include `skillleaf doctor` output after removing private paths or content.
