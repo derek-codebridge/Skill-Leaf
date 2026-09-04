@@ -15,6 +15,7 @@ mod routing;
 mod security;
 mod sync;
 mod usage;
+mod web;
 
 use routing::{match_score, tokens, validate_aliases};
 
@@ -31,9 +32,11 @@ pub use migrate::{
 pub use security::{PolicyFinding, PolicyReport, TrustLevel, inspect_catalog};
 pub use sync::{
     DEFAULT_SYNC_CHUNK_BYTES, PullOptions, SYNC_PROTOCOL_VERSION, SyncManifest, SyncReceipt,
-    SyncStatus, publish_snapshot, pull_snapshot, sync_status,
+    SyncStatus, SyncVersion, list_sync_versions, publish_snapshot, pull_snapshot,
+    rollback_sync_snapshot, sync_status,
 };
 pub use usage::{UsageEntry, UsageReport, record_hydrations, usage_report};
+pub use web::serve_ui;
 
 pub const CATALOG_SCHEMA: &str = "skillleaf.catalog.v1";
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 256 * 1024;

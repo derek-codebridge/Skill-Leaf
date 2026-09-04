@@ -6,10 +6,11 @@ use skillleaf::{
     build_catalog_with_options, doctor, domain_catalog_path, evaluate, hydrate_with_policy,
     inspect_catalog, load_catalog, load_domain_registry, load_eval_suite, load_migration_plan,
     load_migration_receipt, plan_migration, publish_snapshot, pull_snapshot, record_hydrations,
-    resolve, rollback_migration, sync_status, usage_report, write_catalog_atomic,
+    resolve, rollback_migration, serve_ui, sync_status, usage_report, write_catalog_atomic,
     write_domain_registry_atomic, write_migration_plan,
 };
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -111,6 +112,11 @@ enum Command {
     Sync {
         #[command(subcommand)]
         command: SyncCommand,
+    },
+    /// Open the loopback-only REST dashboard.
+    Ui {
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        bind: SocketAddr,
     },
 }
 
@@ -342,6 +348,7 @@ fn run() -> Result<()> {
         Command::Domain { command } => run_domain(command)?,
         Command::Migrate { command } => run_migrate(command)?,
         Command::Sync { command } => run_sync(command)?,
+        Command::Ui { bind } => serve_ui(bind)?,
     }
     Ok(())
 }

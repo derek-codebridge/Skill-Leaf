@@ -40,5 +40,9 @@ docs:
 docs-timings:
     @RUSTDOCFLAGS="-D warnings" cargo doc --lib --no-deps --all-features --locked --timings
 
+# Launch the local Skill-Leaf REST dashboard.
+ui bind="127.0.0.1:8787":
+    @cargo run --locked -- ui --bind {{bind}}
+
 # Run the complete local verification surface.
 check: fmt-check test lint docs

@@ -26,6 +26,19 @@ Across 20 warm runs on an Apple Silicon development machine, resolution averaged
 
 Those numbers describe one machine, library and task. Measure your own setup before making capacity or cost claims.
 
+## Local REST dashboard
+
+Launch the loopback-only interface, then open the printed URL:
+
+```sh
+just ui
+# or: skillleaf ui --bind 127.0.0.1:8787
+```
+
+The dashboard lists the current skills and commands, shows content-hash versions, rolls back only to locally verified snapshots, pulls updates, saves immutable backups, and shares the configured snapshot location through `/api/v1/*`. State-changing requests require `X-SkillLeaf-Request: 1` before body parsing, JSON bodies are capped at 16 KiB, and non-loopback binds are rejected. The interface ships inside the Rust binary with no Node.js runtime or external assets.
+
+The **Backup / bucket location** accepts any filesystem path. Point it at a local folder or a folder mounted or synchronised by Cloudflare R2, Amazon S3, Azure Blob Storage, OneDrive, or another object-storage filesystem bridge. Skill-Leaf does not yet collect cloud credentials or call provider APIs directly; access control and share revocation stay with the selected storage provider.
+
 ## Quick start
 
 ```sh

@@ -1,4 +1,4 @@
-use crate::domain::{DomainConfig, validate_domain_name};
+use crate::domain::{DomainConfig, DomainRegistry, validate_domain_name};
 use crate::{
     Catalog, SkillleafError, SkillleafResult, TrustLevel, catalog_hash, contained_path, doctor,
     load_catalog, load_domain_registry, root_key, sha256, write_catalog_atomic,
@@ -22,6 +22,7 @@ const POINTER_SCHEMA: &str = "skillleaf.sync-pointer.v1";
 const RECEIPT_SCHEMA: &str = "skillleaf.sync-receipt.v1";
 const STATUS_SCHEMA: &str = "skillleaf.sync-status.v1";
 const LOCAL_STATE_SCHEMA: &str = "skillleaf.sync-local-state.v1";
+const VERSION_SCHEMA: &str = "skillleaf.sync-version.v1";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SyncChunk {
@@ -90,6 +91,16 @@ pub struct SyncStatus {
     pub local_verified: bool,
     pub update_available: bool,
     pub fallback_ready: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SyncVersion {
+    pub schema: &'static str,
+    pub snapshot_id: String,
+    pub catalog_path: PathBuf,
+    pub trusted: bool,
+    pub active: bool,
+    pub entries: usize,
 }
 
 pub fn publish_snapshot(
@@ -357,17 +368,14 @@ fn materialize_snapshot(
     let catalog =
         load_catalog(&catalog_path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
     doctor(&catalog).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    bind_domain(registry_path, domain, &domain_root, &catalog_path)?;
-    write_json_atomic(
-        &LocalState {
-            schema: LOCAL_STATE_SCHEMA.to_string(),
-            protocol: SYNC_PROTOCOL_VERSION,
-            snapshot_id: manifest.snapshot_id.clone(),
-            catalog_path: catalog_path.clone(),
-            trusted,
-        },
-        &domain_root.join("current.json"),
-    )?;
+    let state = LocalState {
+        schema: LOCAL_STATE_SCHEMA.to_string(),
+        protocol: SYNC_PROTOCOL_VERSION,
+        snapshot_id: manifest.snapshot_id.clone(),
+        catalog_path: catalog_path.clone(),
+        trusted,
+    };
+    activate_snapshot(registry_path, domain, &domain_root, &state)?;
     Ok(SyncReceipt {
         schema: RECEIPT_SCHEMA,
         mode: "remote",
@@ -400,6 +408,118 @@ fn offline_fallback(destination: &Path, registry_path: &Path, domain: &str) -> R
         domain: domain.to_string(),
         catalog_path: state.catalog_path,
         trusted: state.trusted,
+    })
+}
+
+pub fn list_sync_versions(destination: &Path, domain: &str) -> SkillleafResult<Vec<SyncVersion>> {
+    list_sync_versions_inner(destination, domain)
+        .map_err(|error| SkillleafError::Integrity(format!("{error:#}")))
+}
+
+fn list_sync_versions_inner(destination: &Path, domain: &str) -> Result<Vec<SyncVersion>> {
+    validate_domain_name(domain)?;
+    let domain_root = destination.join("domains").join(domain);
+    let active = match fs::read(domain_root.join("current.json")) {
+        Ok(bytes) => {
+            let state: LocalState =
+                serde_json::from_slice(&bytes).context("invalid local sync state")?;
+            if state.schema != LOCAL_STATE_SCHEMA || state.protocol != SYNC_PROTOCOL_VERSION {
+                bail!("unsupported local sync state");
+            }
+            Some(state.snapshot_id)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let snapshots_root = domain_root.join("snapshots");
+    let entries = match fs::read_dir(&snapshots_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut versions = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let metadata = fs::symlink_metadata(entry.path())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("snapshot directory name is not UTF-8"))?;
+        let (snapshot_id, trusted) = if let Some(id) = name.strip_suffix("-trusted") {
+            (id, true)
+        } else if let Some(id) = name.strip_suffix("-untrusted") {
+            (id, false)
+        } else {
+            continue;
+        };
+        validate_snapshot_id(snapshot_id)?;
+        let catalog_path = entry.path().join("catalog.json");
+        let catalog =
+            load_catalog(&catalog_path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        doctor(&catalog).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        versions.push(SyncVersion {
+            schema: VERSION_SCHEMA,
+            snapshot_id: snapshot_id.to_string(),
+            catalog_path,
+            trusted,
+            active: active.as_deref() == Some(snapshot_id),
+            entries: catalog.entries.len(),
+        });
+    }
+    versions.sort_by(|a, b| {
+        b.active
+            .cmp(&a.active)
+            .then_with(|| b.snapshot_id.cmp(&a.snapshot_id))
+    });
+    Ok(versions)
+}
+
+pub fn rollback_sync_snapshot(
+    destination: &Path,
+    registry_path: &Path,
+    domain: &str,
+    snapshot_id: &str,
+) -> SkillleafResult<SyncReceipt> {
+    rollback_sync_snapshot_inner(destination, registry_path, domain, snapshot_id)
+        .map_err(|error| SkillleafError::Integrity(format!("{error:#}")))
+}
+
+fn rollback_sync_snapshot_inner(
+    destination: &Path,
+    registry_path: &Path,
+    domain: &str,
+    snapshot_id: &str,
+) -> Result<SyncReceipt> {
+    validate_domain_name(domain)?;
+    validate_snapshot_id(snapshot_id)?;
+    let matches = list_sync_versions_inner(destination, domain)?
+        .into_iter()
+        .filter(|version| version.snapshot_id == snapshot_id)
+        .collect::<Vec<_>>();
+    let version = match matches.as_slice() {
+        [version] => version,
+        [] => bail!("snapshot is not available for rollback: {snapshot_id}"),
+        _ => bail!("snapshot trust state is ambiguous: {snapshot_id}"),
+    };
+    let domain_root = destination.join("domains").join(domain);
+    let state = LocalState {
+        schema: LOCAL_STATE_SCHEMA.to_string(),
+        protocol: SYNC_PROTOCOL_VERSION,
+        snapshot_id: version.snapshot_id.clone(),
+        catalog_path: version.catalog_path.clone(),
+        trusted: version.trusted,
+    };
+    activate_snapshot(registry_path, domain, &domain_root, &state)?;
+    Ok(SyncReceipt {
+        schema: RECEIPT_SCHEMA,
+        mode: "rollback",
+        snapshot_id: version.snapshot_id.clone(),
+        domain: domain.to_string(),
+        catalog_path: version.catalog_path.clone(),
+        trusted: version.trusted,
     })
 }
 
@@ -449,14 +569,35 @@ fn sync_status_inner(remote: &Path, destination: &Path, domain: &str) -> Result<
     })
 }
 
-fn bind_domain(
+fn activate_snapshot(
     registry_path: &Path,
     domain: &str,
     domain_root: &Path,
-    catalog_path: &Path,
+    state: &LocalState,
 ) -> Result<()> {
-    let mut registry =
+    let previous =
         load_domain_registry(registry_path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let updated = registry_with_domain(previous.clone(), domain, domain_root, &state.catalog_path);
+    write_domain_registry_atomic(&updated, registry_path)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if let Err(error) = write_json_atomic(state, &domain_root.join("current.json")) {
+        if let Err(rollback_error) = write_domain_registry_atomic(&previous, registry_path) {
+            bail!(
+                "cannot write local sync state: {error:#}; registry rollback also failed: {rollback_error}"
+            );
+        }
+        return Err(error)
+            .context("cannot write local sync state; registry binding was rolled back");
+    }
+    Ok(())
+}
+
+fn registry_with_domain(
+    mut registry: DomainRegistry,
+    domain: &str,
+    domain_root: &Path,
+    catalog_path: &Path,
+) -> DomainRegistry {
     let previous = registry.domains.get(domain).cloned();
     registry.domains.insert(
         domain.to_string(),
@@ -469,6 +610,18 @@ fn bind_domain(
             account: previous.and_then(|value| value.account),
         },
     );
+    registry
+}
+
+fn bind_domain(
+    registry_path: &Path,
+    domain: &str,
+    domain_root: &Path,
+    catalog_path: &Path,
+) -> Result<()> {
+    let registry =
+        load_domain_registry(registry_path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let registry = registry_with_domain(registry, domain, domain_root, catalog_path);
     write_domain_registry_atomic(&registry, registry_path)
         .map_err(|error| anyhow::anyhow!(error.to_string()))
 }
