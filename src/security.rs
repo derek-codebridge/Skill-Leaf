@@ -17,6 +17,21 @@ impl TrustLevel {
     }
 }
 
+pub(crate) fn effective_trust(
+    source_trust: TrustLevel,
+    declared: Option<&str>,
+    path: &Path,
+) -> Result<TrustLevel> {
+    match declared.map(str::trim) {
+        None | Some("trusted") => Ok(source_trust),
+        Some("untrusted") => Ok(TrustLevel::Untrusted),
+        Some(value) => bail!(
+            "frontmatter trust must be 'trusted' or 'untrusted' in {}: {value}",
+            path.display()
+        ),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PolicyFinding {
     pub selector: String,

@@ -122,6 +122,7 @@ pub struct BuildOptions {
 struct Frontmatter {
     name: Option<String>,
     description: Option<String>,
+    trust: Option<String>,
     #[serde(default)]
     dependencies: Vec<String>,
     #[serde(default)]
@@ -148,6 +149,8 @@ pub struct ResolvedEntry {
     pub description: String,
     pub content_sha256: String,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "TrustLevel::is_trusted")]
+    pub trust: TrustLevel,
     pub reasons: Vec<String>,
 }
 
@@ -155,6 +158,8 @@ pub struct ResolvedEntry {
 pub struct HydratedEntry {
     pub selector: String,
     pub content_sha256: String,
+    #[serde(default, skip_serializing_if = "TrustLevel::is_trusted")]
+    pub trust: TrustLevel,
     pub content: String,
 }
 
@@ -355,6 +360,7 @@ fn resolve_inner(
                 description: entry.description.clone(),
                 content_sha256: entry.content_sha256.clone(),
                 bytes: entry.bytes,
+                trust: entry.trust,
                 reasons: reasons.into_iter().collect(),
             })
         })
@@ -426,6 +432,7 @@ fn hydrate_inner(
         hydrated.push(HydratedEntry {
             selector: selector.clone(),
             content_sha256: actual_hash,
+            trust: entry.trust,
             content,
         });
     }
@@ -447,6 +454,10 @@ fn doctor_inner(catalog: &Catalog) -> Result<()> {
     validate_dependencies(&catalog.entries)
 }
 
+fn is_visible_entry(entry: &walkdir::DirEntry) -> bool {
+    entry.depth() == 0 || !entry.file_name().to_string_lossy().starts_with('.')
+}
+
 fn index_skills(
     source: &str,
     root: &Path,
@@ -454,7 +465,12 @@ fn index_skills(
     trust: TrustLevel,
     entries: &mut Vec<CatalogEntry>,
 ) -> Result<()> {
-    for item in WalkDir::new(root).follow_links(false).sort_by_file_name() {
+    for item in WalkDir::new(root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(is_visible_entry)
+    {
         let item = item?;
         if item.file_type().is_symlink() || !item.file_type().is_file() {
             continue;
@@ -467,6 +483,7 @@ fn index_skills(
         let body = read_bounded_utf8(skill_path, max_file_bytes)?;
         security::validate_instruction_text(skill_path, &body)?;
         let frontmatter = parse_frontmatter(&body);
+        let trust = security::effective_trust(trust, frontmatter.trust.as_deref(), skill_path)?;
         let default_name = package_root
             .strip_prefix(root)?
             .to_string_lossy()
@@ -498,46 +515,75 @@ fn index_skills(
             },
         )?);
 
-        for resource in WalkDir::new(package_root)
-            .follow_links(false)
-            .sort_by_file_name()
+        index_skill_resources(
+            source,
+            root,
+            package_root,
+            &name,
+            max_file_bytes,
+            trust,
+            entries,
+        )?;
+    }
+    Ok(())
+}
+
+fn index_skill_resources(
+    source: &str,
+    root: &Path,
+    package_root: &Path,
+    skill_name: &str,
+    max_file_bytes: u64,
+    trust: TrustLevel,
+    entries: &mut Vec<CatalogEntry>,
+) -> Result<()> {
+    for resource in WalkDir::new(package_root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(is_visible_entry)
+    {
+        let resource = resource?;
+        if resource.file_type().is_symlink()
+            || !resource.file_type().is_file()
+            || resource.path() == package_root.join("SKILL.md")
+            || resource.path().extension().and_then(|value| value.to_str()) != Some("md")
         {
-            let resource = resource?;
-            if resource.file_type().is_symlink()
-                || !resource.file_type().is_file()
-                || resource.path() == skill_path
-                || resource.path().extension().and_then(|value| value.to_str()) != Some("md")
-            {
-                continue;
-            }
-            let _ = read_bounded_utf8(resource.path(), max_file_bytes)?;
-            security::validate_instruction_text(
-                resource.path(),
-                &read_bounded_utf8(resource.path(), max_file_bytes)?,
-            )?;
-            let relative = resource.path().strip_prefix(package_root)?;
-            let resource_name = format!(
-                "{}/{}",
-                name,
-                relative
-                    .to_string_lossy()
-                    .replace(std::path::MAIN_SEPARATOR, "/")
-            );
-            entries.push(make_entry(
-                source,
-                EntryKind::Resource,
-                resource_name,
-                format!("Resource for skill {name}"),
-                root,
-                resource.path(),
-                EntryMetadata {
-                    aliases: Vec::new(),
-                    trust,
-                    capabilities: Vec::new(),
-                    dependencies: Vec::new(),
-                },
-            )?);
+            continue;
         }
+        let owned_by_nested_skill = resource
+            .path()
+            .ancestors()
+            .skip(1)
+            .take_while(|ancestor| *ancestor != package_root)
+            .any(|ancestor| ancestor.join("SKILL.md").is_file());
+        if owned_by_nested_skill {
+            continue;
+        }
+        let body = read_bounded_utf8(resource.path(), max_file_bytes)?;
+        security::validate_instruction_text(resource.path(), &body)?;
+        let relative = resource.path().strip_prefix(package_root)?;
+        let resource_name = format!(
+            "{}/{}",
+            skill_name,
+            relative
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/")
+        );
+        entries.push(make_entry(
+            source,
+            EntryKind::Resource,
+            resource_name,
+            format!("Resource for skill {skill_name}"),
+            root,
+            resource.path(),
+            EntryMetadata {
+                aliases: Vec::new(),
+                trust,
+                capabilities: Vec::new(),
+                dependencies: Vec::new(),
+            },
+        )?);
     }
     Ok(())
 }
@@ -549,7 +595,12 @@ fn index_commands(
     trust: TrustLevel,
     entries: &mut Vec<CatalogEntry>,
 ) -> Result<()> {
-    for item in WalkDir::new(root).follow_links(false).sort_by_file_name() {
+    for item in WalkDir::new(root)
+        .follow_links(false)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(is_visible_entry)
+    {
         let item = item?;
         if item.file_type().is_symlink()
             || !item.file_type().is_file()
@@ -560,6 +611,7 @@ fn index_commands(
         let body = read_bounded_utf8(item.path(), max_file_bytes)?;
         security::validate_instruction_text(item.path(), &body)?;
         let frontmatter = parse_frontmatter(&body);
+        let trust = security::effective_trust(trust, frontmatter.trust.as_deref(), item.path())?;
         let default_name = item
             .path()
             .strip_prefix(root)?
@@ -729,22 +781,51 @@ fn parse_frontmatter(body: &str) -> Frontmatter {
 }
 
 fn parse_frontmatter_fields(yaml: &str) -> Frontmatter {
+    let lines = yaml.lines().collect::<Vec<_>>();
     let mut frontmatter = Frontmatter::default();
     let mut list = None;
-    for line in yaml.lines() {
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
         let trimmed = line.trim();
-        if let Some(value) = trimmed.strip_prefix("name:") {
-            frontmatter.name = nonempty_scalar(value);
-            list = None;
-        } else if let Some(value) = trimmed.strip_prefix("description:") {
-            frontmatter.description = nonempty_scalar(value);
-            list = None;
-        } else if trimmed == "dependencies:" {
-            list = Some("dependencies");
-        } else if trimmed == "aliases:" {
-            list = Some("aliases");
-        } else if trimmed == "capabilities:" {
-            list = Some("capabilities");
+        let indentation = line.len() - line.trim_start().len();
+
+        if indentation == 0 {
+            if let Some(value) = trimmed.strip_prefix("name:") {
+                frontmatter.name = nonempty_scalar(value);
+                list = None;
+            } else if let Some(value) = trimmed.strip_prefix("description:") {
+                let value = value.trim();
+                if is_block_scalar_indicator(value) {
+                    let start = index + 1;
+                    index = start;
+                    while index < lines.len() {
+                        let candidate = lines[index];
+                        if !candidate.trim().is_empty()
+                            && candidate.len() - candidate.trim_start().len() <= indentation
+                        {
+                            break;
+                        }
+                        index += 1;
+                    }
+                    frontmatter.description = block_scalar(&lines[start..index]);
+                    list = None;
+                    continue;
+                }
+                frontmatter.description = nonempty_scalar(value);
+                list = None;
+            } else if let Some(value) = trimmed.strip_prefix("trust:") {
+                frontmatter.trust = Some(value.trim().trim_matches(['\'', '"']).to_string());
+                list = None;
+            } else if trimmed == "dependencies:" {
+                list = Some("dependencies");
+            } else if trimmed == "aliases:" {
+                list = Some("aliases");
+            } else if trimmed == "capabilities:" {
+                list = Some("capabilities");
+            } else if !trimmed.is_empty() {
+                list = None;
+            }
         } else if let Some(active) = list {
             if let Some(value) = trimmed.strip_prefix('-') {
                 if let Some(value) = nonempty_scalar(value) {
@@ -759,8 +840,30 @@ fn parse_frontmatter_fields(yaml: &str) -> Frontmatter {
                 list = None;
             }
         }
+        index += 1;
     }
     frontmatter
+}
+
+fn is_block_scalar_indicator(value: &str) -> bool {
+    let mut characters = value.chars();
+    matches!(characters.next(), Some('>' | '|'))
+        && characters.all(|character| matches!(character, '+' | '-' | '1'..='9'))
+}
+
+fn block_scalar(lines: &[&str]) -> Option<String> {
+    let indentation = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start().len())
+        .min()?;
+    let value = lines
+        .iter()
+        .map(|line| line.get(indentation..).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn nonempty_scalar(value: &str) -> Option<String> {
@@ -887,7 +990,10 @@ fn contained_path(root: &Path, relative: impl AsRef<Path>) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn catalog_hash(roots: &BTreeMap<String, String>, entries: &[CatalogEntry]) -> Result<String> {
+pub(crate) fn catalog_hash(
+    roots: &BTreeMap<String, String>,
+    entries: &[CatalogEntry],
+) -> Result<String> {
     #[derive(Serialize)]
     struct Material<'a> {
         schema: &'a str,

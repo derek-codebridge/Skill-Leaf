@@ -154,6 +154,57 @@ fn malformed_but_common_frontmatter_has_a_deterministic_fallback() -> anyhow::Re
 }
 
 #[test]
+fn block_scalar_descriptions_are_indexed_without_overwriting_top_level_fields() -> anyhow::Result<()>
+{
+    let temp = tempfile::tempdir()?;
+    let skills = temp.path().join("skills");
+    fs::create_dir_all(skills.join("folded"))?;
+    fs::create_dir_all(skills.join("literal"))?;
+    fs::create_dir_all(skills.join("inline"))?;
+    fs::write(
+        skills.join("folded/SKILL.md"),
+        "---\nname: folded\ndescription: >-\n  Review changes safely.\n  name: must-not-replace-the-skill-name\n---\n# Folded\n",
+    )?;
+    fs::write(
+        skills.join("literal/SKILL.md"),
+        "---\nname: literal\ndescription: |\n  Preserve this literal description.\n  Across multiple lines.\n---\n# Literal\n",
+    )?;
+    fs::write(
+        skills.join("inline/SKILL.md"),
+        "---\nname: inline\ndescription: Keep > characters in an inline description.\n---\n# Inline\n",
+    )?;
+
+    let catalog = build_catalog(
+        &[SourceRoot {
+            name: "local".to_string(),
+            kind: EntryKind::Skill,
+            path: skills,
+        }],
+        256 * 1024,
+    )?;
+    let entries = catalog
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.description.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    assert_eq!(
+        entries.get("folded"),
+        Some(&"Review changes safely. name: must-not-replace-the-skill-name")
+    );
+    assert_eq!(
+        entries.get("literal"),
+        Some(&"Preserve this literal description. Across multiple lines.")
+    );
+    assert_eq!(
+        entries.get("inline"),
+        Some(&"Keep > characters in an inline description.")
+    );
+    assert!(!entries.contains_key("must-not-replace-the-skill-name"));
+    Ok(())
+}
+
+#[test]
 fn duplicate_source_kind_roots_fail_closed() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     for root in ["first", "second"] {
@@ -326,6 +377,135 @@ fn untrusted_sources_require_explicit_selection_and_hydration() -> anyhow::Resul
 }
 
 #[test]
+fn frontmatter_trust_is_monotonic_for_skills_and_commands() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("skills/review"))?;
+    fs::create_dir_all(temp.path().join("commands"))?;
+    fs::write(
+        temp.path().join("skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review external instructions.\ntrust: untrusted\n---\n",
+    )?;
+    fs::write(
+        temp.path().join("commands/claimed.md"),
+        "---\nname: claimed\ndescription: Claimed trusted command.\ntrust: trusted\n---\n",
+    )?;
+    let catalog = build_catalog_with_options(
+        &[
+            SourceRoot {
+                name: "personal".to_string(),
+                kind: EntryKind::Skill,
+                path: temp.path().join("skills"),
+            },
+            SourceRoot {
+                name: "downloaded".to_string(),
+                kind: EntryKind::Command,
+                path: temp.path().join("commands"),
+            },
+        ],
+        256 * 1024,
+        &BuildOptions {
+            untrusted_roots: BTreeSet::from(["downloaded/command".to_string()]),
+            ..BuildOptions::default()
+        },
+    )?;
+
+    for entry in &catalog.entries {
+        assert_eq!(entry.trust, skillleaf::TrustLevel::Untrusted);
+    }
+    assert!(
+        resolve(&catalog, "review claimed instructions", &[], 3)?
+            .selected
+            .is_empty()
+    );
+
+    let selectors = [
+        "personal/skill:review".to_string(),
+        "downloaded/command:claimed".to_string(),
+    ];
+    for selector in selectors {
+        let resolution = resolve(&catalog, "", std::slice::from_ref(&selector), 3)?;
+        assert_eq!(
+            resolution.selected[0].trust,
+            skillleaf::TrustLevel::Untrusted
+        );
+        assert_eq!(
+            serde_json::to_value(&resolution.selected[0])?["trust"],
+            "untrusted"
+        );
+        assert!(hydrate(&catalog, std::slice::from_ref(&selector)).is_err());
+        let hydrated = hydrate_with_policy(&catalog, std::slice::from_ref(&selector), true)?;
+        assert_eq!(hydrated[0].trust, skillleaf::TrustLevel::Untrusted);
+        assert_eq!(serde_json::to_value(&hydrated[0])?["trust"], "untrusted");
+    }
+    Ok(())
+}
+
+#[test]
+fn trusted_metadata_preserves_trusted_defaults_without_receipt_overhead() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    fs::create_dir_all(temp.path().join("commands"))?;
+    fs::write(
+        temp.path().join("commands/review.md"),
+        "---\nname: review\ndescription: Review local code.\ntrust: trusted\n---\n",
+    )?;
+    let catalog = build_catalog(
+        &[SourceRoot {
+            name: "local".to_string(),
+            kind: EntryKind::Command,
+            path: temp.path().join("commands"),
+        }],
+        256 * 1024,
+    )?;
+    let entry = &catalog.entries[0];
+    assert_eq!(entry.trust, skillleaf::TrustLevel::Trusted);
+    assert!(serde_json::to_value(entry)?.get("trust").is_none());
+
+    let resolution = resolve(&catalog, "review local code", &[], 3)?;
+    assert_eq!(resolution.selected[0].trust, skillleaf::TrustLevel::Trusted);
+    assert!(
+        serde_json::to_value(&resolution.selected[0])?
+            .get("trust")
+            .is_none()
+    );
+    let hydrated = hydrate(&catalog, &["local/command:review".to_string()])?;
+    assert_eq!(hydrated[0].trust, skillleaf::TrustLevel::Trusted);
+    assert!(serde_json::to_value(&hydrated[0])?.get("trust").is_none());
+    Ok(())
+}
+
+#[test]
+fn invalid_frontmatter_trust_is_rejected_for_skills_and_commands() -> anyhow::Result<()> {
+    for (kind, root_name, relative_path) in [
+        (EntryKind::Skill, "skills", "entry/SKILL.md"),
+        (EntryKind::Command, "commands", "entry.md"),
+    ] {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join(root_name);
+        let path = root.join(relative_path);
+        fs::create_dir_all(path.parent().expect("fixture parent"))?;
+        fs::write(
+            &path,
+            "---\nname: entry\ndescription: Invalid trust.\ntrust: verified\n---\n",
+        )?;
+        let error = build_catalog(
+            &[SourceRoot {
+                name: "local".to_string(),
+                kind,
+                path: root,
+            }],
+            256 * 1024,
+        )
+        .expect_err("unknown trust values must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("trust must be 'trusted' or 'untrusted'")
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn trusted_default_keeps_catalog_serialization_backwards_compatible() -> anyhow::Result<()> {
     let (_temp, catalog_path) = fixture()?;
     let catalog = load_catalog(&catalog_path)?;
@@ -411,5 +591,72 @@ fn hidden_direction_overrides_are_rejected() -> anyhow::Result<()> {
     )
     .expect_err("display-spoofing control must fail");
     assert!(error.to_string().contains("bidirectional override"));
+    Ok(())
+}
+
+#[test]
+fn hidden_directories_are_ignored_and_nested_resources_have_single_owner() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let skills = temp.path().join("skills");
+    let commands = temp.path().join("commands");
+    fs::create_dir_all(skills.join("parent/shared"))?;
+    fs::create_dir_all(skills.join("parent/child/references"))?;
+    fs::create_dir_all(skills.join(".codebridge-backups/parent"))?;
+    fs::create_dir_all(commands.join(".codebridge-backups"))?;
+    fs::write(
+        skills.join("parent/SKILL.md"),
+        "---\nname: parent\ndescription: Parent skill.\n---\n",
+    )?;
+    fs::write(skills.join("parent/shared/note.md"), "# Parent note\n")?;
+    fs::write(
+        skills.join("parent/child/SKILL.md"),
+        "---\nname: child\ndescription: Child skill.\n---\n",
+    )?;
+    fs::write(
+        skills.join("parent/child/references/note.md"),
+        "# Child note\n",
+    )?;
+    fs::write(
+        skills.join(".codebridge-backups/parent/SKILL.md"),
+        "---\nname: parent\ndescription: Backup copy.\n---\n",
+    )?;
+    fs::write(
+        commands.join("finish.md"),
+        "---\nname: finish\ndescription: Visible command.\n---\n",
+    )?;
+    fs::write(
+        commands.join(".codebridge-backups/finish.md"),
+        "---\nname: finish\ndescription: Backup command.\n---\n",
+    )?;
+
+    let catalog = build_catalog(
+        &[
+            SourceRoot {
+                name: "local".to_string(),
+                kind: EntryKind::Skill,
+                path: skills,
+            },
+            SourceRoot {
+                name: "local".to_string(),
+                kind: EntryKind::Command,
+                path: commands,
+            },
+        ],
+        256 * 1024,
+    )?;
+    let selectors = catalog
+        .entries
+        .iter()
+        .map(|entry| entry.selector())
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(selectors.len(), 5);
+    assert!(selectors.contains("local/skill:parent"));
+    assert!(selectors.contains("local/resource:parent/shared/note.md"));
+    assert!(selectors.contains("local/skill:child"));
+    assert!(selectors.contains("local/resource:child/references/note.md"));
+    assert!(selectors.contains("local/command:finish"));
+    assert!(!selectors.contains("local/resource:parent/child/SKILL.md"));
+    assert!(!selectors.contains("local/resource:parent/child/references/note.md"));
     Ok(())
 }

@@ -87,3 +87,132 @@ fn example_workflow_runs_end_to_end() {
         .success()
         .stdout(predicate::str::contains("PASS: 4 entries verified"));
 }
+
+#[test]
+fn text_output_marks_only_untrusted_entries() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let skills = temp.path().join("skills");
+    for (name, trust) in [("safe", "trusted"), ("risky", "untrusted")] {
+        let skill = skills.join(name);
+        std::fs::create_dir_all(&skill)?;
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Review instructions.\ntrust: {trust}\n---\n"),
+        )?;
+    }
+    let catalog = temp.path().join("skillleaf.json");
+    Command::cargo_bin("skillleaf")?
+        .args([
+            "index",
+            "--skills",
+            &format!("example={}", skills.display()),
+            "--output",
+            catalog.to_str().expect("catalog path"),
+        ])
+        .assert()
+        .success();
+
+    for subcommand in ["resolve", "read"] {
+        let mut risky = Command::cargo_bin("skillleaf")?;
+        risky.args([
+            subcommand,
+            "--catalog",
+            catalog.to_str().expect("catalog path"),
+        ]);
+        if subcommand == "resolve" {
+            risky.args(["--task", "", "--require", "example/skill:risky"]);
+        } else {
+            risky.args(["--many", "example/skill:risky", "--allow-untrusted"]);
+        }
+        risky
+            .args(["--format", "text"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("UNTRUSTED"));
+
+        let mut safe = Command::cargo_bin("skillleaf")?;
+        safe.args([
+            subcommand,
+            "--catalog",
+            catalog.to_str().expect("catalog path"),
+        ]);
+        if subcommand == "resolve" {
+            safe.args(["--task", "", "--require", "example/skill:safe"]);
+        } else {
+            safe.args(["--many", "example/skill:safe"]);
+        }
+        safe.args(["--format", "text"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("UNTRUSTED").not());
+    }
+    Ok(())
+}
+
+#[test]
+fn resolve_defaults_to_three_and_honours_an_explicit_limit() -> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let skills = temp.path().join("skills");
+    for name in ["alpha", "beta", "gamma", "delta"] {
+        let skill = skills.join(name);
+        std::fs::create_dir_all(&skill)?;
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!(
+                "---\nname: {name}\ndescription: Review validation release workflow.\n---\n# {name}\n"
+            ),
+        )?;
+    }
+    let catalog = temp.path().join("skillleaf.json");
+    Command::cargo_bin("skillleaf")?
+        .args([
+            "index",
+            "--skills",
+            &format!("example={}", skills.display()),
+            "--output",
+            catalog.to_str().expect("catalog path"),
+        ])
+        .assert()
+        .success();
+
+    let default_output = Command::cargo_bin("skillleaf")?
+        .args([
+            "resolve",
+            "--catalog",
+            catalog.to_str().expect("catalog path"),
+            "--task",
+            "review validation release workflow",
+        ])
+        .output()?;
+    assert!(default_output.status.success());
+    let default_resolution: serde_json::Value = serde_json::from_slice(&default_output.stdout)?;
+    assert_eq!(
+        default_resolution["selected"]
+            .as_array()
+            .expect("selected array")
+            .len(),
+        3
+    );
+
+    let explicit_output = Command::cargo_bin("skillleaf")?
+        .args([
+            "resolve",
+            "--catalog",
+            catalog.to_str().expect("catalog path"),
+            "--task",
+            "review validation release workflow",
+            "--limit",
+            "4",
+        ])
+        .output()?;
+    assert!(explicit_output.status.success());
+    let explicit_resolution: serde_json::Value = serde_json::from_slice(&explicit_output.stdout)?;
+    assert_eq!(
+        explicit_resolution["selected"]
+            .as_array()
+            .expect("selected array")
+            .len(),
+        4
+    );
+    Ok(())
+}

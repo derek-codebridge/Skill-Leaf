@@ -2,11 +2,11 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use skillleaf::{
     BuildOptions, DEFAULT_MAX_FILE_BYTES, DomainConfig, EntryKind, HostKind, SourceRoot,
-    apply_migration_with_receipt, build_catalog_with_options, doctor, domain_catalog_path,
-    evaluate, hydrate_with_policy, inspect_catalog, load_catalog, load_domain_registry,
-    load_eval_suite, load_migration_plan, load_migration_receipt, plan_migration,
-    record_hydrations, resolve, rollback_migration, usage_report, write_catalog_atomic,
-    write_domain_registry_atomic, write_migration_plan,
+    TrustLevel, apply_migration_with_receipt, build_catalog_with_options, doctor,
+    domain_catalog_path, evaluate, hydrate_with_policy, inspect_catalog, load_catalog,
+    load_domain_registry, load_eval_suite, load_migration_plan, load_migration_receipt,
+    plan_migration, record_hydrations, resolve, rollback_migration, usage_report,
+    write_catalog_atomic, write_domain_registry_atomic, write_migration_plan,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -46,7 +46,7 @@ enum Command {
         task: String,
         #[arg(long = "require")]
         required: Vec<String>,
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 3)]
         limit: usize,
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         format: OutputFormat,
@@ -86,7 +86,7 @@ enum Command {
         selection: CatalogSelection,
         #[arg(long)]
         suite: PathBuf,
-        #[arg(long, default_value_t = 8)]
+        #[arg(long, default_value_t = 3)]
         limit: usize,
     },
     /// Inspect catalogue trust and declared-capability policy.
@@ -371,7 +371,12 @@ fn run_resolve(
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&resolution)?),
         OutputFormat::Text => {
             for entry in resolution.selected {
-                println!("{}\t{}", entry.selector, entry.description);
+                let trust = if entry.trust == TrustLevel::Untrusted {
+                    "\tUNTRUSTED"
+                } else {
+                    ""
+                };
+                println!("{}\t{}{}", entry.selector, entry.description, trust);
             }
         }
     }
@@ -397,7 +402,15 @@ fn run_read(
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&hydrated)?),
         OutputFormat::Text => {
             for entry in hydrated {
-                println!("--- {} {} ---", entry.selector, entry.content_sha256);
+                let trust = if entry.trust == TrustLevel::Untrusted {
+                    " UNTRUSTED"
+                } else {
+                    ""
+                };
+                println!(
+                    "--- {} {}{} ---",
+                    entry.selector, entry.content_sha256, trust
+                );
                 println!("{}", entry.content);
             }
         }
