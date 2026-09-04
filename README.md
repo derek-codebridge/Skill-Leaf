@@ -104,6 +104,34 @@ skillleaf doctor \
 
 Native slash-command files remain in the host's command directory, so `/commands` continue to work. To undo the migration, run `skillleaf migrate rollback --receipt migration-receipt.json`. Rollback refuses to remove anything if the copied domain, adapter or registry changed after apply; review those changes rather than losing them.
 
+## Share and sync a catalogue
+
+The filesystem federation transport works with a local folder, network mount, OneDrive folder, or an R2/S3/Azure mount or gateway. It publishes immutable content-addressed chunks and moves the small `current.json` pointer only after the complete snapshot is durable. Pulls materialise a verified generation, then atomically update the domain registry; older generations remain available as offline fallback.
+
+```sh
+skillleaf sync publish \
+  --catalog "$HOME/.config/skillleaf/catalog.json" \
+  --remote "$HOME/OneDrive/skillleaf-team"
+
+# Pin the printed snapshot ID to preserve its trust metadata. Without a pin,
+# every imported entry is downgraded to untrusted and cannot route automatically.
+skillleaf sync pull \
+  --remote "$HOME/OneDrive/skillleaf-team" \
+  --destination "$HOME/.local/share/skillleaf" \
+  --domain team \
+  --registry "$HOME/.config/skillleaf/domains.json" \
+  --expected-snapshot <sha256>
+
+skillleaf sync status \
+  --remote "$HOME/OneDrive/skillleaf-team" \
+  --destination "$HOME/.local/share/skillleaf" \
+  --domain team
+```
+
+Running `sync pull` again is the manual update/resync action. If the remote folder is unavailable, pull re-verifies and rebinds the last local generation by default; pass `--no-offline-fallback` to fail instead. Only indexed UTF-8 Markdown bodies are transferred—Skill-Leaf does not copy or execute scripts or binaries. Protocol ranges are negotiated explicitly, paths and sizes are bounded, and every chunk, file, manifest and catalogue is hash-verified.
+
+Filesystem sharing inherits access and revocation from its storage provider. Revoking access prevents future pulls but cannot erase copies already downloaded. Native R2, S3 and Azure Blob APIs, authenticated share links and a small monitor GUI can be added behind this stable JSON/CLI contract; adding them now would duplicate provider authentication and increase the attack surface before the sync format has field experience.
+
 The same commands work in PowerShell with native Windows paths. No shell-specific copy, archive or symlink command is required.
 
 ## Expected benefit
@@ -191,6 +219,7 @@ Claude Code, Codex, OpenCode, CI and custom agent runners can use the same binar
 ### Use it alongside CodeBridge
 
 Skill-Leaf and CodeBridge are complementary: Skill-Leaf owns standalone filesystem catalogues and host-neutral routing, while CodeBridge owns its bundled/plugin catalogue, host setup and OBY orchestration. When both are installed, keep one active router and one owner for each body; do not merge domains implicitly or count one hydration twice.
+Skill-Leaf has no licence-key check, CodeBridge runtime dependency, remote service requirement or paid activation step.
 
 Current CodeBridge setup/update prunes its managed per-skill shims and installs a single catalogue router. Keep that router as the owner of CodeBridge entries, and use standalone Skill-Leaf for separate personal or project libraries. Older CodeBridge installations that still expose managed per-skill shims should be updated. Never remove personal or modified skills merely to reduce prompt size.
 

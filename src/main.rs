@@ -1,12 +1,13 @@
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use skillleaf::{
-    BuildOptions, DEFAULT_MAX_FILE_BYTES, DomainConfig, EntryKind, HostKind, SourceRoot,
-    TrustLevel, apply_migration_with_receipt, build_catalog_with_options, doctor,
-    domain_catalog_path, evaluate, hydrate_with_policy, inspect_catalog, load_catalog,
-    load_domain_registry, load_eval_suite, load_migration_plan, load_migration_receipt,
-    plan_migration, record_hydrations, resolve, rollback_migration, usage_report,
-    write_catalog_atomic, write_domain_registry_atomic, write_migration_plan,
+    BuildOptions, DEFAULT_MAX_FILE_BYTES, DEFAULT_SYNC_CHUNK_BYTES, DomainConfig, EntryKind,
+    HostKind, PullOptions, SourceRoot, TrustLevel, apply_migration_with_receipt,
+    build_catalog_with_options, doctor, domain_catalog_path, evaluate, hydrate_with_policy,
+    inspect_catalog, load_catalog, load_domain_registry, load_eval_suite, load_migration_plan,
+    load_migration_receipt, plan_migration, publish_snapshot, pull_snapshot, record_hydrations,
+    resolve, rollback_migration, sync_status, usage_report, write_catalog_atomic,
+    write_domain_registry_atomic, write_migration_plan,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -106,6 +107,11 @@ enum Command {
         #[command(subcommand)]
         command: MigrateCommand,
     },
+    /// Publish, update, or inspect a filesystem-backed shared snapshot.
+    Sync {
+        #[command(subcommand)]
+        command: SyncCommand,
+    },
 }
 
 #[derive(Clone, Debug, Args)]
@@ -191,6 +197,51 @@ enum MigrateCommand {
     Rollback {
         #[arg(long)]
         receipt: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncCommand {
+    /// Publish the indexed Markdown bodies as an immutable chunked snapshot.
+    Publish {
+        #[arg(long)]
+        catalog: PathBuf,
+        #[arg(long)]
+        remote: PathBuf,
+        #[arg(long, default_value_t = DEFAULT_SYNC_CHUNK_BYTES)]
+        chunk_bytes: usize,
+    },
+    /// Pull and atomically bind the current snapshot to an isolated domain.
+    Pull {
+        #[arg(long)]
+        remote: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+        #[arg(long)]
+        domain: String,
+        #[arg(
+            long,
+            env = "SKILLLEAF_REGISTRY",
+            default_value = "skillleaf-domains.json"
+        )]
+        registry: PathBuf,
+        #[arg(long, conflicts_with = "trust_remote")]
+        expected_snapshot: Option<String>,
+        /// Preserve publisher trust metadata without a snapshot pin.
+        #[arg(long)]
+        trust_remote: bool,
+        /// Fail instead of rebinding the last verified local snapshot when remote storage is unavailable.
+        #[arg(long)]
+        no_offline_fallback: bool,
+    },
+    /// Report remote freshness and whether a verified local fallback is ready.
+    Status {
+        #[arg(long)]
+        remote: PathBuf,
+        #[arg(long)]
+        destination: PathBuf,
+        #[arg(long)]
+        domain: String,
     },
 }
 
@@ -290,6 +341,7 @@ fn run() -> Result<()> {
         }
         Command::Domain { command } => run_domain(command)?,
         Command::Migrate { command } => run_migrate(command)?,
+        Command::Sync { command } => run_sync(command)?,
     }
     Ok(())
 }
@@ -529,6 +581,50 @@ fn run_migrate(command: MigrateCommand) -> Result<()> {
             rollback_migration(&receipt_data)?;
             println!("rolled back migration {}", receipt_data.plan_id);
         }
+    }
+    Ok(())
+}
+
+fn run_sync(command: SyncCommand) -> Result<()> {
+    match command {
+        SyncCommand::Publish {
+            catalog,
+            remote,
+            chunk_bytes,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(&publish_snapshot(&catalog, &remote, chunk_bytes)?)?
+        ),
+        SyncCommand::Pull {
+            remote,
+            destination,
+            domain,
+            registry,
+            expected_snapshot,
+            trust_remote,
+            no_offline_fallback,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(&pull_snapshot(
+                &remote,
+                &destination,
+                &registry,
+                &domain,
+                &PullOptions {
+                    expected_snapshot,
+                    trust_remote,
+                    allow_offline_fallback: !no_offline_fallback,
+                },
+            )?)?
+        ),
+        SyncCommand::Status {
+            remote,
+            destination,
+            domain,
+        } => println!(
+            "{}",
+            serde_json::to_string_pretty(&sync_status(&remote, &destination, &domain)?)?
+        ),
     }
     Ok(())
 }

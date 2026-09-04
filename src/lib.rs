@@ -13,6 +13,7 @@ mod eval;
 mod migrate;
 mod routing;
 mod security;
+mod sync;
 mod usage;
 
 use routing::{match_score, tokens, validate_aliases};
@@ -28,6 +29,10 @@ pub use migrate::{
     rollback_migration, write_migration_plan, write_migration_receipt,
 };
 pub use security::{PolicyFinding, PolicyReport, TrustLevel, inspect_catalog};
+pub use sync::{
+    DEFAULT_SYNC_CHUNK_BYTES, PullOptions, SYNC_PROTOCOL_VERSION, SyncManifest, SyncReceipt,
+    SyncStatus, publish_snapshot, pull_snapshot, sync_status,
+};
 pub use usage::{UsageEntry, UsageReport, record_hydrations, usage_report};
 
 pub const CATALOG_SCHEMA: &str = "skillleaf.catalog.v1";

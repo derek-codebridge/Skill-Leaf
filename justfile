@@ -20,6 +20,14 @@ fmt-check:
 test:
     @cargo test --all-targets --all-features --locked
 
+# Run command-line federation and workflow tests explicitly.
+e2e:
+    @cargo test --test cli --test sync --locked
+
+# Reject dependencies with known RustSec advisories (requires cargo-audit).
+audit:
+    @cargo audit --deny warnings
+
 # Reject every Clippy warning across all targets.
 lint:
     @cargo clippy --all-targets --all-features --locked -- -D warnings
