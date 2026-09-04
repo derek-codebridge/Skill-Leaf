@@ -1,6 +1,6 @@
 use crate::domain::{DomainConfig, DomainRegistry, validate_domain_name};
 use crate::{
-    EntryKind, SkillleafError, SkillleafResult, SourceRoot, build_catalog, doctor, sha256,
+    Catalog, EntryKind, SkillleafError, SkillleafResult, SourceRoot, build_catalog, doctor, sha256,
     write_catalog_atomic, write_domain_registry_atomic, write_json_atomic,
 };
 use anyhow::{Context, Result, bail};
@@ -218,22 +218,40 @@ fn apply_migration_inner(plan: &MigrationPlan) -> Result<MigrationReceipt> {
             );
         }
     }
-    let domain_root = plan.destination_root.join("domains").join(&plan.domain);
+    let domains_root = plan.destination_root.join("domains");
+    fs::create_dir_all(&domains_root)?;
+    let domains_root = domains_root.canonicalize()?;
+    let domain_root = domains_root.join(&plan.domain);
     if domain_root.exists() {
         bail!(
             "domain destination already exists: {}",
             domain_root.display()
         );
     }
-    fs::create_dir_all(&domain_root)?;
-    let result = apply_into_domain(plan, &domain_root);
+    let staging_root = domains_root.join(format!(
+        ".skillleaf-{}-{}.staging",
+        plan.domain, plan.plan_id
+    ));
+    if staging_root.exists() {
+        bail!(
+            "migration staging destination already exists: {}",
+            staging_root.display()
+        );
+    }
+    fs::create_dir(&staging_root)?;
+    let result = apply_into_domain(plan, &domain_root, &staging_root);
     if result.is_err() {
+        let _ = fs::remove_dir_all(&staging_root);
         let _ = fs::remove_dir_all(&domain_root);
     }
     result
 }
 
-fn apply_into_domain(plan: &MigrationPlan, domain_root: &Path) -> Result<MigrationReceipt> {
+fn apply_into_domain(
+    plan: &MigrationPlan,
+    domain_root: &Path,
+    staging_root: &Path,
+) -> Result<MigrationReceipt> {
     let mut copied_roots = Vec::new();
     for source in &plan.sources {
         let kind = match source.kind {
@@ -241,7 +259,7 @@ fn apply_into_domain(plan: &MigrationPlan, domain_root: &Path) -> Result<Migrati
             EntryKind::Command => "commands",
             EntryKind::Resource => bail!("resource roots cannot be migrated directly"),
         };
-        let target = domain_root.join(kind).join(&source.name);
+        let target = staging_root.join(kind).join(&source.name);
         copy_tree(&source.path, &target)?;
         copied_roots.push(SourceRoot {
             name: source.name.clone(),
@@ -252,9 +270,7 @@ fn apply_into_domain(plan: &MigrationPlan, domain_root: &Path) -> Result<Migrati
     let catalog = build_catalog(&copied_roots, crate::DEFAULT_MAX_FILE_BYTES)
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     doctor(&catalog).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let catalog_path = domain_root.join("catalog.json");
-    write_catalog_atomic(&catalog, &catalog_path)
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let (catalog, catalog_path) = publish_staged_catalog(catalog, staging_root, domain_root)?;
 
     let registry_before = if plan.registry_path.exists() {
         Some(
@@ -322,6 +338,31 @@ fn apply_into_domain(plan: &MigrationPlan, domain_root: &Path) -> Result<Migrati
     })
 }
 
+fn publish_staged_catalog(
+    mut catalog: Catalog,
+    staging_root: &Path,
+    domain_root: &Path,
+) -> Result<(Catalog, PathBuf)> {
+    for root in catalog.roots.values_mut() {
+        let relative = Path::new(root)
+            .strip_prefix(staging_root)
+            .with_context(|| format!("catalog root is outside staging: {root}"))?;
+        *root = domain_root.join(relative).to_string_lossy().into_owned();
+    }
+    catalog.catalog_sha256 = crate::catalog_hash(&catalog.roots, &catalog.entries)?;
+    write_catalog_atomic(&catalog, &staging_root.join("catalog.json"))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    fs::rename(staging_root, domain_root).with_context(|| {
+        format!(
+            "cannot atomically publish {} as {}",
+            staging_root.display(),
+            domain_root.display()
+        )
+    })?;
+    let catalog_path = domain_root.join("catalog.json");
+    Ok((catalog, catalog_path))
+}
+
 pub fn rollback_migration(receipt: &MigrationReceipt) -> SkillleafResult<()> {
     rollback_migration_inner(receipt).map_err(|error| SkillleafError::Storage(format!("{error:#}")))
 }
@@ -354,7 +395,14 @@ fn rollback_migration_inner(receipt: &MigrationReceipt) -> Result<()> {
 
 fn adapter_body(domain: &str, registry: &Path) -> String {
     format!(
-        "---\nname: skillleaf\ndescription: Route local skills and commands lazily through Skill-Leaf.\n---\n# Skill-Leaf router\n\nResolve the current task with `skillleaf resolve --domain {domain} --registry \"{}\" --task \"<task>\"`, then hydrate all selected selectors in one `skillleaf read --domain {domain} --registry \"{}\" --many <selectors>` call. Do not preload unselected bodies. Native slash-command files remain owned by the host and must not be removed.\n",
+        "---
+name: skillleaf
+description: Route local skills and commands lazily through Skill-Leaf.
+---
+# Skill-Leaf router
+
+Resolve the current task with `skillleaf resolve --domain {domain} --registry \"{}\" --task \"<task>\" --limit 3`, then hydrate all selected selectors in one `skillleaf read --domain {domain} --registry \"{}\" --many <selectors>` call. Keep exactly one active router and do not preload unselected bodies. Native slash-command files remain owned by the host and must not be removed.
+",
         registry.display(),
         registry.display()
     )

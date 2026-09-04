@@ -39,7 +39,7 @@ skillleaf index \
 export SKILLLEAF_CATALOG="$HOME/.config/skillleaf/catalog.json"
 export SKILLLEAF_USAGE_FILE="$HOME/.config/skillleaf/usage.json"
 
-skillleaf resolve --task "review and finish this code change"
+skillleaf resolve --task "review and finish this code change" --limit 3
 skillleaf read --many personal/skill:critical-review
 skillleaf stats --format text
 skillleaf doctor
@@ -118,18 +118,19 @@ Skill-Leaf helps when the host would otherwise preload a large skill and command
 - one catalogue shared across Claude Code, Codex, OpenCode, CI and custom agent runners;
 - local usage evidence showing which entries earn maintenance and which never get hydrated.
 
-The host must honour the router workflow for these savings to appear. Skill-Leaf cannot stop a host from preloading files that remain in its own discovery directory. Measure a clean session before and after migration rather than assuming the result.
+The host must honour the router workflow for these savings to appear. Skill-Leaf cannot stop a host from preloading files that remain in its own discovery directory. Start with `--limit 3` for ordinary work and lower it to `2` for especially narrow tasks; explicit dependencies still expand to their complete verified closure. Measure a clean session before and after migration rather than assuming the result.
 
 ## Supported layout
 
 Skill roots contain folders with a `SKILL.md`. Markdown files beneath the same folder become separately addressable resources. Relative Markdown links from `SKILL.md` become verified dependencies.
 
-Command roots contain Markdown files. Optional frontmatter supports a name, description, deterministic aliases, declared capabilities and explicit dependencies:
+Command roots contain Markdown files. Skill and command frontmatter supports a name, description, deterministic aliases, declared capabilities, explicit dependencies and an optional trust downgrade:
 
 ```yaml
 ---
 name: finish
-description: Finish a change with review and verification.
+description: >-
+  Finish a change with review and verification.
 aliases:
   - release-finish
 capabilities:
@@ -156,9 +157,11 @@ Relative Markdown links and explicit `dependencies` form the verified chain. Arb
 - Skill-Leaf reads instructions. It does not execute bundled scripts.
 - Hidden control characters and bidirectional display overrides are rejected while indexing.
 - Sources indexed with `--untrusted-skills` or `--untrusted-commands` cannot route automatically. They require an exact `--require` and `read --allow-untrusted`.
+- Skill and command frontmatter may set `trust: untrusted` to apply the same restrictions. `trust: trusted` never upgrades an untrusted source; empty or unknown values fail indexing.
+- Untrusted selections and hydrations include `"trust": "untrusted"` in JSON receipts. Trusted receipts omit the default field, so the safety signal adds no normal routing tokens.
 - `capabilities` declarations make requested shell, network, write, secret and deployment authority inspectable; they are evidence, not a sandbox.
 
-Static checks cannot prove that natural-language instructions are harmless. Treat downloaded skills as untrusted, review their hashes and declared capabilities, and use the host's permission boundary for tool execution.
+Static checks cannot prove that natural-language instructions are harmless, and self-authored metadata is not proof of safety. Treat downloaded skills as untrusted at the source-root boundary, check the trust value on hydration receipts, contain untrusted bodies as passive data during review, and use the host's permission boundary for tool execution.
 
 ## Measure routing quality
 
@@ -179,11 +182,17 @@ Skill-Leaf does not execute skills, grant tool permissions or infer private work
 An agent host needs one compact instruction:
 
 ```text
-Before loading skills, run skillleaf resolve for the task. Read the returned
+Before loading skills, run skillleaf resolve --limit 3 for the task. Read the returned
 selectors together with skillleaf read --many. Do not preload unselected bodies.
 ```
 
 Claude Code, Codex, OpenCode, CI and custom agent runners can use the same binary. Host-specific installers can remain separate from the verified core.
+
+### Use it alongside CodeBridge
+
+Skill-Leaf and CodeBridge are complementary: Skill-Leaf owns standalone filesystem catalogues and host-neutral routing, while CodeBridge owns its bundled/plugin catalogue, host setup and OBY orchestration. When both are installed, keep one active router and one owner for each body; do not merge domains implicitly or count one hydration twice.
+
+Current CodeBridge setup/update prunes its managed per-skill shims and installs a single catalogue router. Keep that router as the owner of CodeBridge entries, and use standalone Skill-Leaf for separate personal or project libraries. Older CodeBridge installations that still expose managed per-skill shims should be updated. Never remove personal or modified skills merely to reduce prompt size.
 
 ## See what earns its place
 

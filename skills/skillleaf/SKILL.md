@@ -7,7 +7,7 @@ description: Route large local agent skill and command libraries without loading
 Use the local Skill-Leaf binary before loading capability instructions.
 
 1. Summarise the current task in one concrete sentence.
-2. Run `skillleaf resolve --task "<summary>"`. If `SKILLLEAF_DOMAIN` is set, keep that domain; never merge catalogues across domains.
+2. Run `skillleaf resolve --task "<summary>" --limit 3`. Lower the limit to `2` for especially narrow tasks. If `SKILLLEAF_DOMAIN` is set, keep that domain; never merge catalogues across domains.
 3. Read the returned `selected[].selector` values.
 4. Hydrate all selected selectors in one call: `skillleaf read --many <selector,selector>`.
 5. Follow the hydrated instructions and retain the catalogue and content hashes as a compact receipt.
@@ -16,4 +16,4 @@ Use `SKILLLEAF_CATALOG` for a catalogue outside the current directory. Set `SKIL
 
 If resolution returns no entries, continue without inventing a skill. If the catalogue or body hash fails, run `skillleaf doctor`, rebuild the catalogue, and do not use stale content. Never add `--allow-untrusted` unless the user explicitly selected and approved that source.
 
-Do not preload unselected bodies. Do not execute scripts merely because a skill package contains them.
+Keep exactly one active router and one owner for each skill body. When CodeBridge is installed, let its catalogue router own CodeBridge entries and use Skill-Leaf only for separate personal or project libraries. Do not preload unselected bodies. Do not execute scripts merely because a skill package contains them.

@@ -43,7 +43,19 @@ fn migration_is_non_destructive_domain_isolated_and_reversible() -> anyhow::Resu
         "native slash command must remain in place"
     );
     assert!(receipt.adapter_path.exists());
+    let adapter = std::fs::read_to_string(&receipt.adapter_path)?;
+    assert!(adapter.contains("--limit 3"));
+    assert!(adapter.contains("exactly one active router"));
     assert!(receipt.domain_root.join("catalog.json").exists());
+    let published_domains = std::fs::read_dir(
+        receipt
+            .domain_root
+            .parent()
+            .expect("published domain has a parent"),
+    )?
+    .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(published_domains.len(), 1, "staging directory must be gone");
+    assert_eq!(published_domains[0].file_name(), "work");
     assert!(
         load_domain_registry(&registry)?
             .domains
@@ -133,6 +145,12 @@ fn adapter_conflict_leaves_no_partial_registry_or_domain() -> anyhow::Result<()>
     assert!(error.to_string().contains("different content"));
     assert!(!registry.exists());
     assert!(!destination.join("domains/work").exists());
+    assert!(
+        std::fs::read_dir(destination.join("domains"))?
+            .next()
+            .is_none(),
+        "failed migration must not leave a staging directory"
+    );
     assert_eq!(std::fs::read_to_string(adapter)?, "custom adapter");
     Ok(())
 }
