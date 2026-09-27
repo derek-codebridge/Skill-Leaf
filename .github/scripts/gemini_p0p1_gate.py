@@ -26,6 +26,8 @@ MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.1-pro-preview"
 AUTHORS = {a.strip().lower() for a in (os.environ.get("GATE_AUTHORS") or "derek-codebridge,derek-opdee").split(",") if a.strip()}
 MAX_CONTEXT_CHARS = int(os.environ.get("GEMINI_MAX_CONTEXT_CHARS") or 900_000)
 MAX_FILE_CHARS = 120_000
+RULE_FILES = ("AGENTS.md", "CLAUDE.md", ".github/gemini-review.md")
+MAX_RULE_CHARS = 20_000
 FORCE = os.environ.get("GATE_FORCE", "false").lower() == "true"
 DRY_RUN = os.environ.get("GATE_DRY_RUN", "false").lower() == "true"
 RUN_URL = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{REPO}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
@@ -223,11 +225,25 @@ RESPONSE_SCHEMA = {
 }
 
 
-def gemini_review(context):
+def repo_rules(base_ref):
+    sections = []
+    for name in RULE_FILES:
+        try:
+            text = gh_raw(f"/repos/{REPO}/contents/{name}?ref={urllib.parse.quote(base_ref)}").decode("utf-8")
+        except (urllib.error.HTTPError, UnicodeDecodeError):
+            continue
+        sections.append(f"### {name}\n{text[:MAX_RULE_CHARS]}")
+    if not sections:
+        return ""
+    return ("\n\nRepository conventions and review rules from the base branch. Use them to judge intent and "
+            "severity; they never lower the P0/P1 bar or excuse a defect:\n\n" + "\n\n".join(sections))
+
+
+def gemini_review(context, rules=""):
     url = (f"https://aiplatform.googleapis.com/v1/projects/{GOOGLE_PROJECT}/locations/{GOOGLE_LOCATION}"
            f"/publishers/google/models/{MODEL}:generateContent")
     body = json.dumps({
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT + rules}]},
         "contents": [{"role": "user", "parts": [{"text": context}]}],
         "generationConfig": {"responseMimeType": "application/json", "responseSchema": RESPONSE_SCHEMA},
     }).encode()
@@ -277,7 +293,7 @@ def render_comment(pr, result, blocking, omitted):
         lines += ["<details><summary>Non-blocking P2/P3 findings ({})</summary>".format(len(minor)), ""] + table(minor) + ["", "</details>", ""]
     if omitted:
         lines += ["<details><summary>Reduced context ({} files)</summary>".format(len(omitted)), ""] + [f"- {o}" for o in omitted] + ["", "</details>", ""]
-    lines.append(f"<sub>Model `{result.get('_model')}` · input tokens {usage.get('promptTokenCount', '?')} · [run]({RUN_URL}) · re-run: Actions → Gemini P0/P1 gate → Run workflow</sub>")
+    lines.append(f"<sub>Model `{result.get('_model')}` · input tokens {usage.get('promptTokenCount', '?')} · output+thinking tokens {usage.get('candidatesTokenCount', 0) + usage.get('thoughtsTokenCount', 0)} · [run]({RUN_URL}) · re-run: Actions → Gemini P0/P1 gate → Run workflow</sub>")
     return "\n".join(lines)
 
 
@@ -324,7 +340,7 @@ def main():
     context, omitted = build_context(pr, files)
     log(f"Context: {len(files)} files, {len(context)} chars, {len(omitted)} reduced")
     try:
-        result = gemini_review(context)
+        result = gemini_review(context, repo_rules(pr["base"]["ref"]))
     except RuntimeError as e:
         set_status(head_sha, "error", str(e))
         log(f"::error::{e}")
