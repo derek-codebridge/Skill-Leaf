@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 CODEX_BOT = "chatgpt-codex-connector[bot]"
 STATUS_CONTEXT = "Gemini P0/P1 gate"
@@ -22,12 +23,26 @@ GH_TOKEN = os.environ["GITHUB_TOKEN"]
 GOOGLE_TOKEN = os.environ.get("GOOGLE_ACCESS_TOKEN", "")
 GOOGLE_PROJECT = os.environ.get("GOOGLE_PROJECT") or "seo-tools-claude"
 GOOGLE_LOCATION = os.environ.get("GOOGLE_LOCATION") or "global"
-MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.1-pro-preview"
-AUTHORS = {a.strip().lower() for a in (os.environ.get("GATE_AUTHORS") or "derek-codebridge,derek-opdee").split(",") if a.strip()}
+MODELS = [
+    m.strip()
+    for m in (
+        os.environ.get("GEMINI_MODELS")
+        or os.environ.get("GEMINI_MODEL")
+        or "gemini-3.1-pro-preview,gemini-3.8-flash"
+    ).split(",")
+    if m.strip()
+]
+AUTHORS = {
+    a.strip().lower()
+    for a in (os.environ.get("GATE_AUTHORS") or "derek-codebridge,derek-opdee").split(",")
+    if a.strip()
+}
 MAX_CONTEXT_CHARS = int(os.environ.get("GEMINI_MAX_CONTEXT_CHARS") or 900_000)
 MAX_FILE_CHARS = 120_000
-RULE_FILES = ("AGENTS.md", "CLAUDE.md", ".github/gemini-review.md")
-MAX_RULE_CHARS = 20_000
+RULE_FILE_NAMES = ("AGENTS.md", "CLAUDE.md")
+REVIEW_FILE = ".github/gemini-review.md"
+RULE_HEADING = re.compile(r"^(#{1,6})\s*(code review rules|review guidelines)\b.*$", re.I | re.M)
+MAX_RULE_CHARS = 60_000
 FORCE = os.environ.get("GATE_FORCE", "false").lower() == "true"
 DRY_RUN = os.environ.get("GATE_DRY_RUN", "false").lower() == "true"
 RUN_URL = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{REPO}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
@@ -40,12 +55,17 @@ def log(msg):
 def gh_request(method, path, body=None, accept="application/vnd.github+json"):
     url = path if path.startswith("http") else f"https://api.github.com{path}"
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={
-        "Authorization": f"Bearer {GH_TOKEN}",
-        "Accept": accept,
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "gemini-p0p1-gate",
-    })
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {GH_TOKEN}",
+            "Accept": accept,
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "gemini-p0p1-gate",
+        },
+    )
     with urllib.request.urlopen(req, timeout=60) as resp:
         return resp.read(), resp.headers.get("Link", "")
 
@@ -74,12 +94,16 @@ def set_status(sha, state, description):
     if DRY_RUN:
         log(f"[dry-run] status {state}: {description}")
         return
-    gh("POST", f"/repos/{REPO}/statuses/{sha}", {
-        "state": state,
-        "context": STATUS_CONTEXT,
-        "description": description[:140],
-        "target_url": RUN_URL,
-    })
+    gh(
+        "POST",
+        f"/repos/{REPO}/statuses/{sha}",
+        {
+            "state": state,
+            "context": STATUS_CONTEXT,
+            "description": description[:140],
+            "target_url": RUN_URL,
+        },
+    )
 
 
 def resolve_pr_number():
@@ -96,8 +120,14 @@ def resolve_pr_number():
 
 def codex_clean(pr_number, head_sha):
     comments = gh_all(f"/repos/{REPO}/issues/{pr_number}/comments")
-    summary = next((c for c in reversed(comments)
-                    if c["user"]["login"] == CODEX_BOT and "codex-pull-request-review-summary" in c["body"]), None)
+    summary = next(
+        (
+            c
+            for c in reversed(comments)
+            if c["user"]["login"] == CODEX_BOT and "codex-pull-request-review-summary" in c["body"]
+        ),
+        None,
+    )
     if not summary:
         return False, "no Codex review summary on this PR"
     row = re.search(r"Code Review\*\*\s*\|([^|]*)\|\s*`([0-9a-f]{7,40})`", summary["body"])
@@ -128,15 +158,22 @@ def existing_verdict(head_sha):
     return None
 
 
-CODE_EXT = re.compile(r"\.(rs|ts|tsx|js|jsx|mjs|cjs|svelte|vue|py|php|go|java|kt|swift|cs|rb|c|cc|cpp|h|hpp|sql|sh|ps1)$")
-LOW_PRIORITY = re.compile(r"(^|/)(docs?|fixtures?|__snapshots__|testdata)/|\.(md|mdx|txt|json|ya?ml|toml|lock|csv)$")
+CODE_EXT = re.compile(
+    r"\.(rs|ts|tsx|js|jsx|mjs|cjs|svelte|vue|py|php|go|java|kt|swift|cs|rb|c|cc|cpp|h|hpp|sql|sh|ps1)$"
+)
+LOW_PRIORITY = re.compile(
+    r"(^|/)(docs?|fixtures?|__snapshots__|testdata)/|\.(md|mdx|txt|json|ya?ml|toml|lock|csv)$"
+)
 
 
 def review_priority(f):
     name = f["filename"]
     if CODE_EXT.search(name) and not LOW_PRIORITY.search(name):
         return 0 if not re.search(r"(^|/)(tests?|__tests__|spec)/|[._-](test|spec)\.", name) else 1
-    if re.search(r"(^|/)(\.github/workflows|migrations?)/|(^|/)(Dockerfile|wrangler\.toml|package\.json|Cargo\.toml)$", name):
+    if re.search(
+        r"(^|/)(\.github/workflows|migrations?)/|(^|/)(Dockerfile|wrangler\.toml|package\.json|Cargo\.toml)$",
+        name,
+    ):
         return 0
     return 2 if LOW_PRIORITY.search(name) else 1
 
@@ -148,7 +185,11 @@ def build_context(pr, files):
         f"# Pull request #{pr['number']}: {pr['title']}\n",
         f"Base: {pr['base']['ref']}  Head: {pr['head']['ref']} @ {head_sha}\n",
         f"## Description\n{(pr.get('body') or '(none)')[:8000]}\n",
-        "## Changed files\n" + "\n".join(f"- {f['status']}: {f['filename']} (+{f['additions']}/-{f['deletions']})" for f in files) + "\n",
+        "## Changed files\n"
+        + "\n".join(
+            f"- {f['status']}: {f['filename']} (+{f['additions']}/-{f['deletions']})" for f in files
+        )
+        + "\n",
         "## Diff\n",
     ]
     budget = MAX_CONTEXT_CHARS - sum(len(p) for p in parts)
@@ -170,7 +211,9 @@ def build_context(pr, files):
         if f["status"] == "removed" or SKIP_PATH.search(name):
             continue
         try:
-            text = gh_raw(f"/repos/{REPO}/contents/{urllib.parse.quote(name)}?ref={head_sha}").decode("utf-8")
+            text = gh_raw(
+                f"/repos/{REPO}/contents/{urllib.parse.quote(name)}?ref={head_sha}"
+            ).decode("utf-8")
         except (urllib.error.HTTPError, UnicodeDecodeError):
             continue
         if len(text) > MAX_FILE_CHARS:
@@ -183,7 +226,11 @@ def build_context(pr, files):
         parts.append(chunk)
         budget -= len(chunk)
     if omitted:
-        parts.append("## Not included (review with reduced context)\n" + "\n".join(f"- {o}" for o in omitted) + "\n")
+        parts.append(
+            "## Not included (review with reduced context)\n"
+            + "\n".join(f"- {o}" for o in omitted)
+            + "\n"
+        )
     return "".join(parts), omitted
 
 
@@ -225,75 +272,211 @@ RESPONSE_SCHEMA = {
 }
 
 
-def repo_rules(base_ref):
+def rule_sections(text):
     sections = []
-    for name in RULE_FILES:
+    for match in RULE_HEADING.finditer(text):
+        level = len(match.group(1))
+        end = re.compile(rf"^#{{1,{level}}}\s", re.M).search(text, match.end())
+        sections.append(text[match.start() : end.start() if end else len(text)].strip())
+    return sections
+
+
+def repo_rules(base_ref, changed_paths):
+    ref = urllib.parse.quote(base_ref)
+    tree, _ = gh("GET", f"/repos/{REPO}/git/trees/{ref}?recursive=1")
+    rule_paths = {
+        item["path"]
+        for item in tree.get("tree", [])
+        if item.get("type") == "blob" and item["path"].rsplit("/", 1)[-1] in RULE_FILE_NAMES
+    }
+    wanted = set()
+    for path in changed_paths:
+        parts = path.split("/")[:-1]
+        for depth in range(len(parts) + 1):
+            prefix = "/".join(parts[:depth])
+            for name in RULE_FILE_NAMES:
+                candidate = f"{prefix}/{name}" if prefix else name
+                if candidate in rule_paths:
+                    wanted.add(candidate)
+    blocks = []
+    for path in sorted(wanted, key=lambda p: (p.count("/"), p)):
         try:
-            text = gh_raw(f"/repos/{REPO}/contents/{name}?ref={urllib.parse.quote(base_ref)}").decode("utf-8")
+            text = gh_raw(f"/repos/{REPO}/contents/{urllib.parse.quote(path)}?ref={ref}").decode(
+                "utf-8"
+            )
         except (urllib.error.HTTPError, UnicodeDecodeError):
             continue
-        sections.append(f"### {name}\n{text[:MAX_RULE_CHARS]}")
-    if not sections:
-        return ""
-    return ("\n\nRepository conventions and review rules from the base branch. Use them to judge intent and "
-            "severity; they never lower the P0/P1 bar or excuse a defect:\n\n" + "\n\n".join(sections))
+        scope = path.rsplit("/", 1)[0] + "/" if "/" in path else "the whole repository"
+        for section in rule_sections(text):
+            blocks.append(f"### From {path} (applies to {scope})\n{section}")
+    try:
+        review = gh_raw(f"/repos/{REPO}/contents/{REVIEW_FILE}?ref={ref}").decode("utf-8")
+        blocks.append(f"### From {REVIEW_FILE}\n{review}")
+    except (urllib.error.HTTPError, UnicodeDecodeError):
+        pass
+    if not blocks:
+        return "", []
+    text = "\n\n".join(blocks)[:MAX_RULE_CHARS]
+    header = (
+        "\n\nRepository review rules from the base branch. Apply each block only to changed "
+        "files inside its scope. Use them to judge intent and severity; they never lower the "
+        "P0/P1 bar or excuse a defect:\n\n"
+    )
+    return header + text, sorted(wanted)
 
 
-def gemini_review(context, rules=""):
-    url = (f"https://aiplatform.googleapis.com/v1/projects/{GOOGLE_PROJECT}/locations/{GOOGLE_LOCATION}"
-           f"/publishers/google/models/{MODEL}:generateContent")
-    body = json.dumps({
-        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT + rules}]},
-        "contents": [{"role": "user", "parts": [{"text": context}]}],
-        "generationConfig": {"responseMimeType": "application/json", "responseSchema": RESPONSE_SCHEMA},
-    }).encode()
+def gemini_review(context, rules, model):
+    url = (
+        f"https://aiplatform.googleapis.com/v1/projects/{GOOGLE_PROJECT}/locations/{GOOGLE_LOCATION}"
+        f"/publishers/google/models/{model}:generateContent"
+    )
+    body = json.dumps(
+        {
+            "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT + rules}]},
+            "contents": [{"role": "user", "parts": [{"text": context}]}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseSchema": RESPONSE_SCHEMA,
+            },
+        }
+    ).encode()
     last_error = None
     for attempt in range(4):
-        req = urllib.request.Request(url, data=body, method="POST", headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {GOOGLE_TOKEN}",
-        })
+        req = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {GOOGLE_TOKEN}",
+            },
+        )
         try:
             with urllib.request.urlopen(req, timeout=900) as resp:
                 data = json.loads(resp.read())
             parts = data["candidates"][0]["content"]["parts"]
             text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
             result = json.loads(text)
-            result["_model"] = data.get("modelVersion", MODEL)
+            result["_model"] = data.get("modelVersion", model)
             result["_usage"] = data.get("usageMetadata", {})
+            for finding in result.get("findings", []):
+                finding["models"] = [result["_model"]]
             return result
         except urllib.error.HTTPError as e:
             last_error = f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}"
             if e.code not in (429, 500, 502, 503, 504):
                 break
-        except (KeyError, IndexError, json.JSONDecodeError, TimeoutError, urllib.error.URLError) as e:
+        except (
+            KeyError,
+            IndexError,
+            json.JSONDecodeError,
+            TimeoutError,
+            urllib.error.URLError,
+        ) as e:
             last_error = f"{type(e).__name__}: {e}"
         time.sleep(15 * (attempt + 1))
-    raise RuntimeError(f"Gemini review failed: {last_error}")
+    raise RuntimeError(f"{model} review failed: {last_error}")
 
 
-def render_comment(pr, result, blocking, omitted):
+def review_all(context, rules):
+    results, errors = [], []
+    with ThreadPoolExecutor(max_workers=len(MODELS)) as pool:
+        futures = {model: pool.submit(gemini_review, context, rules, model) for model in MODELS}
+        for future in futures.values():
+            try:
+                results.append(future.result())
+            except RuntimeError as e:
+                errors.append(str(e))
+    return results, errors
+
+
+def merge_findings(results):
+    merged = []
+    for result in results:
+        for finding in result.get("findings", []):
+            blocking = finding.get("severity") in ("P0", "P1")
+            match = next(
+                (
+                    m
+                    for m in merged
+                    if m.get("file") == finding.get("file")
+                    and (m.get("severity") in ("P0", "P1")) == blocking
+                    and abs((m.get("line") or 0) - (finding.get("line") or 0)) <= 5
+                ),
+                None,
+            )
+            if match:
+                match["models"] = sorted(set(match["models"]) | set(finding["models"]))
+                if finding["severity"] < match["severity"]:
+                    match["severity"] = finding["severity"]
+            else:
+                merged.append(dict(finding))
+    return sorted(merged, key=lambda f: (f.get("severity", "P9"), f.get("file", "")))
+
+
+def render_comment(pr, results, errors, findings, rule_files, omitted):
     head = pr["head"]["sha"]
-    usage = result.get("_usage", {})
-    verdict = f"❌ **{len(blocking)} blocking (P0/P1) finding(s)**" if blocking else "✅ **No P0/P1 findings**"
-    lines = [STICKY_MARKER, "## Gemini P0/P1 gate", "",
-             f"{verdict} on `{head[:7]}` ({'manual run' if FORCE else 'after Codex sign-off'})", "",
-             result.get("summary", "").strip(), ""]
+    blocking = [f for f in findings if f.get("severity") in ("P0", "P1")]
+    verdict = (
+        f"❌ **{len(blocking)} blocking (P0/P1) finding(s)**"
+        if blocking
+        else "✅ **No P0/P1 findings**"
+    )
+    trigger = "manual run" if FORCE else "after Codex sign-off"
+    lines = [
+        STICKY_MARKER,
+        "## Gemini P0/P1 gate",
+        "",
+        f"{verdict} on `{head[:7]}` ({trigger})",
+        "",
+    ]
+    for result in results:
+        lines += [f"**{result.get('_model')}:** {result.get('summary', '').strip()}", ""]
+    for error in errors:
+        lines += [f"⚠️ {error}", ""]
+
+    def cell(s):
+        return (s or "").replace("|", "\\|").replace("\n", " ")
+
     def table(items):
-        out = ["| Sev | Location | Issue | Failure scenario | Fix |", "| --- | --- | --- | --- | --- |"]
+        out = [
+            "| Sev | Location | Issue | Failure scenario | Fix | Found by |",
+            "| --- | --- | --- | --- | --- | --- |",
+        ]
         for f in items:
             loc = f"`{f.get('file', '?')}{':' + str(f['line']) if f.get('line') else ''}`"
-            cell = lambda s: (s or "").replace("|", "\\|").replace("\n", " ")
-            out.append(f"| {f['severity']} | {loc} | {cell(f.get('title'))} | {cell(f.get('failure_scenario'))} | {cell(f.get('fix'))} |")
+            by = ", ".join(m.replace("gemini-", "") for m in f.get("models", []))
+            out.append(
+                f"| {f['severity']} | {loc} | {cell(f.get('title'))} | "
+                f"{cell(f.get('failure_scenario'))} | {cell(f.get('fix'))} | {by} |"
+            )
         return out
+
     if blocking:
         lines += table(blocking) + [""]
-    minor = [f for f in result.get("findings", []) if f.get("severity") in ("P2", "P3")]
+    minor = [f for f in findings if f.get("severity") in ("P2", "P3")]
     if minor:
-        lines += ["<details><summary>Non-blocking P2/P3 findings ({})</summary>".format(len(minor)), ""] + table(minor) + ["", "</details>", ""]
+        lines += (
+            [f"<details><summary>Non-blocking P2/P3 findings ({len(minor)})</summary>", ""]
+            + table(minor)
+            + ["", "</details>", ""]
+        )
     if omitted:
-        lines += ["<details><summary>Reduced context ({} files)</summary>".format(len(omitted)), ""] + [f"- {o}" for o in omitted] + ["", "</details>", ""]
-    lines.append(f"<sub>Model `{result.get('_model')}` · input tokens {usage.get('promptTokenCount', '?')} · output+thinking tokens {usage.get('candidatesTokenCount', 0) + usage.get('thoughtsTokenCount', 0)} · [run]({RUN_URL}) · re-run: Actions → Gemini P0/P1 gate → Run workflow</sub>")
+        lines += (
+            [f"<details><summary>Reduced context ({len(omitted)} files)</summary>", ""]
+            + [f"- {o}" for o in omitted]
+            + ["", "</details>", ""]
+        )
+    rules = ", ".join(f"`{r}`" for r in rule_files) if rule_files else "none found"
+    usage = " · ".join(
+        f"`{r.get('_model')}` in {r.get('_usage', {}).get('promptTokenCount', '?')} / out+thinking "
+        f"{r.get('_usage', {}).get('candidatesTokenCount', 0) + r.get('_usage', {}).get('thoughtsTokenCount', 0)}"
+        for r in results
+    )
+    lines.append(
+        f"<sub>Rules: {rules} · {usage} · [run]({RUN_URL}) · "
+        "re-run: Actions → Gemini P0/P1 gate → Run workflow</sub>"
+    )
     return "\n".join(lines)
 
 
@@ -335,18 +518,24 @@ def main():
         set_status(head_sha, "error", "Google OIDC token missing")
         log("::error::GOOGLE_ACCESS_TOKEN missing; the google-github-actions/auth step did not run")
         return 1
-    set_status(head_sha, "pending", f"Gemini ({MODEL}) reviewing for P0/P1")
+    set_status(head_sha, "pending", f"Gemini ({', '.join(MODELS)}) reviewing for P0/P1")
     files = gh_all(f"/repos/{REPO}/pulls/{pr_number}/files")
     context, omitted = build_context(pr, files)
-    log(f"Context: {len(files)} files, {len(context)} chars, {len(omitted)} reduced")
-    try:
-        result = gemini_review(context, repo_rules(pr["base"]["ref"]))
-    except RuntimeError as e:
-        set_status(head_sha, "error", str(e))
-        log(f"::error::{e}")
+    rules, rule_files = repo_rules(pr["base"]["ref"], [f["filename"] for f in files])
+    log(
+        f"Context: {len(files)} files, {len(context)} chars, {len(omitted)} reduced; "
+        f"rules from {rule_files or 'none'}; models {MODELS}"
+    )
+    results, errors = review_all(context, rules)
+    for error in errors:
+        log(f"::warning::{error}")
+    if not results:
+        set_status(head_sha, "error", "; ".join(errors))
+        log("::error::every model failed")
         return 1
-    blocking = [f for f in result.get("findings", []) if f.get("severity") in ("P0", "P1")]
-    upsert_comment(pr_number, render_comment(pr, result, blocking, omitted))
+    findings = merge_findings(results)
+    blocking = [f for f in findings if f.get("severity") in ("P0", "P1")]
+    upsert_comment(pr_number, render_comment(pr, results, errors, findings, rule_files, omitted))
     if blocking:
         set_status(head_sha, "failure", f"{len(blocking)} P0/P1 finding(s)")
         log(f"::error::{len(blocking)} P0/P1 finding(s)")
