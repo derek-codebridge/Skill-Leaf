@@ -1,0 +1,48 @@
+name: Gemini P0/P1 gate
+
+on:
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Pull request number
+        required: true
+      force:
+        description: Skip the Codex sign-off and author checks
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+concurrency:
+  group: gemini-p0p1-gate-${{ github.event.issue.number || inputs.pr_number }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+       github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
+       contains(github.event.comment.body, 'codex-pull-request-review-summary'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+          sparse-checkout-cone-mode: false
+      - name: Gemini review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
+          GATE_AUTHORS: ${{ vars.GATE_AUTHORS }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          GATE_FORCE: ${{ inputs.force }}
+        run: python3 .github/scripts/gemini_p0p1_gate.py
