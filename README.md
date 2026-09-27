@@ -249,3 +249,4 @@ Skill-Leaf is source-available under the [MIT License with the Commons Clause Li
 Individuals and businesses may use, modify and run Skill-Leaf, including for internal commercial work. Selling Skill-Leaf itself, a lightly modified substitute, or a paid service whose value derives substantially from Skill-Leaf requires a [separate commercial licence](COMMERCIAL-LICENCE.md).
 
 Contributions are welcome under the [contribution terms](CONTRIBUTOR-LICENCE-AGREEMENT.md). Names and branding remain subject to the [trademark policy](TRADEMARKS.md).
+
