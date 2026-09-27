@@ -19,7 +19,9 @@ SKIP_PATH = re.compile(
 
 REPO = os.environ["GITHUB_REPOSITORY"]
 GH_TOKEN = os.environ["GITHUB_TOKEN"]
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GOOGLE_TOKEN = os.environ.get("GOOGLE_ACCESS_TOKEN", "")
+GOOGLE_PROJECT = os.environ.get("GOOGLE_PROJECT") or "seo-tools-claude"
+GOOGLE_LOCATION = os.environ.get("GOOGLE_LOCATION") or "global"
 MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.1-pro-preview"
 AUTHORS = {a.strip().lower() for a in (os.environ.get("GATE_AUTHORS") or "derek-codebridge,derek-opdee").split(",") if a.strip()}
 MAX_CONTEXT_CHARS = int(os.environ.get("GEMINI_MAX_CONTEXT_CHARS") or 900_000)
@@ -33,7 +35,7 @@ def log(msg):
     print(msg, flush=True)
 
 
-def gh(method, path, body=None, accept="application/vnd.github+json", raw=False):
+def gh_request(method, path, body=None, accept="application/vnd.github+json"):
     url = path if path.startswith("http") else f"https://api.github.com{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers={
@@ -43,11 +45,16 @@ def gh(method, path, body=None, accept="application/vnd.github+json", raw=False)
         "User-Agent": "gemini-p0p1-gate",
     })
     with urllib.request.urlopen(req, timeout=60) as resp:
-        payload = resp.read()
-        link = resp.headers.get("Link", "")
-    if raw:
-        return payload
-    return (json.loads(payload) if payload else None), link
+        return resp.read(), resp.headers.get("Link", "")
+
+
+def gh(method, path, body=None):
+    payload, link = gh_request(method, path, body)
+    return (json.loads(payload) if payload else {}), link
+
+
+def gh_raw(path):
+    return gh_request("GET", path, accept="application/vnd.github.raw")[0]
 
 
 def gh_all(path):
@@ -119,7 +126,21 @@ def existing_verdict(head_sha):
     return None
 
 
+CODE_EXT = re.compile(r"\.(rs|ts|tsx|js|jsx|mjs|cjs|svelte|vue|py|php|go|java|kt|swift|cs|rb|c|cc|cpp|h|hpp|sql|sh|ps1)$")
+LOW_PRIORITY = re.compile(r"(^|/)(docs?|fixtures?|__snapshots__|testdata)/|\.(md|mdx|txt|json|ya?ml|toml|lock|csv)$")
+
+
+def review_priority(f):
+    name = f["filename"]
+    if CODE_EXT.search(name) and not LOW_PRIORITY.search(name):
+        return 0 if not re.search(r"(^|/)(tests?|__tests__|spec)/|[._-](test|spec)\.", name) else 1
+    if re.search(r"(^|/)(\.github/workflows|migrations?)/|(^|/)(Dockerfile|wrangler\.toml|package\.json|Cargo\.toml)$", name):
+        return 0
+    return 2 if LOW_PRIORITY.search(name) else 1
+
+
 def build_context(pr, files):
+    files = sorted((f for f in files if not SKIP_PATH.search(f["filename"])), key=review_priority)
     head_sha = pr["head"]["sha"]
     parts = [
         f"# Pull request #{pr['number']}: {pr['title']}\n",
@@ -147,9 +168,7 @@ def build_context(pr, files):
         if f["status"] == "removed" or SKIP_PATH.search(name):
             continue
         try:
-            raw = gh("GET", f"/repos/{REPO}/contents/{urllib.parse.quote(name)}?ref={head_sha}",
-                     accept="application/vnd.github.raw", raw=True)
-            text = raw.decode("utf-8")
+            text = gh_raw(f"/repos/{REPO}/contents/{urllib.parse.quote(name)}?ref={head_sha}").decode("utf-8")
         except (urllib.error.HTTPError, UnicodeDecodeError):
             continue
         if len(text) > MAX_FILE_CHARS:
@@ -205,7 +224,8 @@ RESPONSE_SCHEMA = {
 
 
 def gemini_review(context):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={GEMINI_KEY}"
+    url = (f"https://aiplatform.googleapis.com/v1/projects/{GOOGLE_PROJECT}/locations/{GOOGLE_LOCATION}"
+           f"/publishers/google/models/{MODEL}:generateContent")
     body = json.dumps({
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [{"role": "user", "parts": [{"text": context}]}],
@@ -213,7 +233,10 @@ def gemini_review(context):
     }).encode()
     last_error = None
     for attempt in range(4):
-        req = urllib.request.Request(url, data=body, method="POST", headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(url, data=body, method="POST", headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GOOGLE_TOKEN}",
+        })
         try:
             with urllib.request.urlopen(req, timeout=900) as resp:
                 data = json.loads(resp.read())
@@ -238,7 +261,7 @@ def render_comment(pr, result, blocking, omitted):
     usage = result.get("_usage", {})
     verdict = f"❌ **{len(blocking)} blocking (P0/P1) finding(s)**" if blocking else "✅ **No P0/P1 findings**"
     lines = [STICKY_MARKER, "## Gemini P0/P1 gate", "",
-             f"{verdict} on `{head[:7]}` (Codex signed off first)", "",
+             f"{verdict} on `{head[:7]}` ({'manual run' if FORCE else 'after Codex sign-off'})", "",
              result.get("summary", "").strip(), ""]
     def table(items):
         out = ["| Sev | Location | Issue | Failure scenario | Fix |", "| --- | --- | --- | --- | --- |"]
@@ -292,9 +315,9 @@ def main():
         if prior in ("success", "failure", "pending"):
             log(f"Gate already {prior} for {head_sha[:7]}; skipping.")
             return 0
-    if not GEMINI_KEY:
-        set_status(head_sha, "error", "GEMINI_API_KEY secret is not set")
-        log("::error::GEMINI_API_KEY secret is not set")
+    if not GOOGLE_TOKEN:
+        set_status(head_sha, "error", "Google OIDC token missing")
+        log("::error::GOOGLE_ACCESS_TOKEN missing; the google-github-actions/auth step did not run")
         return 1
     set_status(head_sha, "pending", f"Gemini ({MODEL}) reviewing for P0/P1")
     files = gh_all(f"/repos/{REPO}/pulls/{pr_number}/files")

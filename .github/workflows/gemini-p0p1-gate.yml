@@ -18,6 +18,7 @@ permissions:
   pull-requests: write
   issues: write
   statuses: write
+  id-token: write
 
 concurrency:
   group: gemini-p0p1-gate-${{ github.event.issue.number || inputs.pr_number }}
@@ -37,10 +38,19 @@ jobs:
         with:
           sparse-checkout: .github/scripts
           sparse-checkout-cone-mode: false
+      - id: gcp
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: projects/85713166752/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: codebridge@seo-tools-claude.iam.gserviceaccount.com
+          token_format: access_token
+          access_token_lifetime: 1800s
+          create_credentials_file: false
       - name: Gemini review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_ACCESS_TOKEN: ${{ steps.gcp.outputs.access_token }}
+          GOOGLE_PROJECT: seo-tools-claude
           GEMINI_MODEL: ${{ vars.GEMINI_MODEL }}
           GATE_AUTHORS: ${{ vars.GATE_AUTHORS }}
           PR_NUMBER: ${{ inputs.pr_number }}
