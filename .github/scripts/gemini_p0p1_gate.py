@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import http.client
 import json
 import os
 import re
@@ -370,8 +371,8 @@ def gemini_review(context, rules, model):
             KeyError,
             IndexError,
             json.JSONDecodeError,
-            TimeoutError,
-            urllib.error.URLError,
+            http.client.HTTPException,
+            OSError,
         ) as e:
             last_error = f"{type(e).__name__}: {e}"
         time.sleep(15 * (attempt + 1))
@@ -385,8 +386,8 @@ def review_all(context, rules):
         for future in futures.values():
             try:
                 results.append(future.result())
-            except RuntimeError as e:
-                errors.append(str(e))
+            except Exception as e:
+                errors.append(f"{type(e).__name__}: {e}")
     return results, errors
 
 
