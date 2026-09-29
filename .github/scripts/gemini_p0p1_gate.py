@@ -46,6 +46,7 @@ RULE_HEADING = re.compile(r"^(#{1,6})\s*(code review rules|review guidelines)\b.
 MAX_RULE_CHARS = 60_000
 FORCE = os.environ.get("GATE_FORCE", "false").lower() == "true"
 DRY_RUN = os.environ.get("GATE_DRY_RUN", "false").lower() == "true"
+DEADLINE = time.monotonic() + int(os.environ.get("GEMINI_REVIEW_BUDGET_SECONDS") or 2400)
 RUN_URL = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{REPO}/actions/runs/{os.environ.get('GITHUB_RUN_ID', '')}"
 
 
@@ -343,6 +344,10 @@ def gemini_review(context, rules, model):
     ).encode()
     last_error = None
     for attempt in range(4):
+        remaining = DEADLINE - time.monotonic()
+        if remaining < 60:
+            last_error = last_error or "review budget exhausted"
+            break
         req = urllib.request.Request(
             url,
             data=body,
@@ -353,7 +358,7 @@ def gemini_review(context, rules, model):
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=900) as resp:
+            with urllib.request.urlopen(req, timeout=min(900, remaining)) as resp:
                 data = json.loads(resp.read())
             parts = data["candidates"][0]["content"]["parts"]
             text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
@@ -375,7 +380,7 @@ def gemini_review(context, rules, model):
             OSError,
         ) as e:
             last_error = f"{type(e).__name__}: {e}"
-        time.sleep(15 * (attempt + 1))
+        time.sleep(min(15 * (attempt + 1), max(0.0, DEADLINE - time.monotonic())))
     raise RuntimeError(f"{model} review failed: {last_error}")
 
 
@@ -383,11 +388,13 @@ def review_all(context, rules):
     results, errors = [], []
     with ThreadPoolExecutor(max_workers=len(MODELS)) as pool:
         futures = {model: pool.submit(gemini_review, context, rules, model) for model in MODELS}
-        for future in futures.values():
+        for model, future in futures.items():
             try:
                 results.append(future.result())
+            except RuntimeError as e:
+                errors.append(str(e))
             except Exception as e:
-                errors.append(f"{type(e).__name__}: {e}")
+                errors.append(f"{model} review failed: {type(e).__name__}: {e}")
     return results, errors
 
 

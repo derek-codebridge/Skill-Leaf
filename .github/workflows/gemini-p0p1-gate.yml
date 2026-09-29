@@ -32,7 +32,7 @@ jobs:
        github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
        contains(github.event.comment.body, 'codex-pull-request-review-summary'))
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
